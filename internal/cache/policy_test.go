@@ -13,6 +13,10 @@ var policies = map[string]func(int64) Policy{
 	"lru":    func(int64) Policy { return NewLRU(8) },
 	"lfu":    func(int64) Policy { return NewLFU(8) },
 	"s3fifo": NewS3FIFO,
+	// lrb with a model that scores recency, so the learned path is exercised by the
+	// conformance, accounting and no-allocation checks rather than only by its own
+	// tests. See lrb_test.go for the tests that prove the model is what decides.
+	"lrb": func(int64) Policy { return NewLRB(recencyHolder(), 8) },
 }
 
 func TestPolicyConformance(t *testing.T) {
@@ -186,6 +190,24 @@ func BenchmarkGetHit(b *testing.B) {
 			i++
 		}
 	})
+}
+
+// TestEvictionDoesNotAllocate holds the line on the reason every policy keeps its
+// running state in fields. Candidates.Sample is reached through an interface, so a
+// visitor closure built per call is heap-allocated, and that allocation lands under
+// the shard lock on the path that only runs when memory is already tight.
+func TestEvictionDoesNotAllocate(t *testing.T) {
+	for name, mk := range policies {
+		t.Run(name, func(t *testing.T) {
+			s := newShard(1<<20, 8, mk(1<<20), func() int64 { return 0 })
+			for i := range 2048 {
+				s.insert(uint64(i), make([]byte, 256), int64(i)*1000, false)
+			}
+			if n := testing.AllocsPerRun(200, func() { s.evictOne(1 << 30) }); n != 0 {
+				t.Errorf("%s allocated %v times per eviction", name, n)
+			}
+		})
+	}
 }
 
 func BenchmarkEvict(b *testing.B) {

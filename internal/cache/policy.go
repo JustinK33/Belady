@@ -33,23 +33,43 @@ type Candidates interface {
 // eviction O(sample) with no global priority queue and no lock beyond the shard's
 // own. Redis's LRU approximation works the same way; LRB's contribution is the
 // score function, not the search.
+// Sample takes a callback and is reached through an interface, so the compiler has
+// to assume the callback escapes. A closure built per Victim call would therefore
+// allocate on every eviction, under the shard lock, precisely when the cache is
+// under memory pressure. Building it once and keeping the running best in fields
+// avoids that; it is safe because a shard's policy is only ever entered under that
+// shard's lock, so there is never a second Victim in flight on the same object.
 type sampled struct {
 	score func(e *Entry, nowUS int64) float64
+	visit func(*Entry) bool
 	name  string
-	n     int
+
+	bestScore float64
+	nowUS     int64
+	best      uint64
+	n         int
+	found     bool
+}
+
+func newSampled(name string, n int, score func(*Entry, int64) float64) *sampled {
+	p := &sampled{name: name, n: n, score: score}
+	p.visit = p.consider
+	return p
 }
 
 func (p *sampled) Name() string { return p.name }
 
 func (p *sampled) Victim(c Candidates, nowUS int64) (uint64, bool) {
-	best, bestScore, found := uint64(0), math.Inf(-1), false
-	c.Sample(p.n, func(e *Entry) bool {
-		if s := p.score(e, nowUS); s > bestScore {
-			bestScore, best, found = s, e.key, true
-		}
-		return true
-	})
-	return best, found
+	p.nowUS, p.bestScore, p.found = nowUS, math.Inf(-1), false
+	c.Sample(p.n, p.visit)
+	return p.best, p.found
+}
+
+func (p *sampled) consider(e *Entry) bool {
+	if s := p.score(e, p.nowUS); s > p.bestScore {
+		p.bestScore, p.best, p.found = s, e.key, true
+	}
+	return true
 }
 
 func (p *sampled) OnAccess(*Entry) {}
@@ -58,13 +78,9 @@ func (p *sampled) OnRemove(*Entry) {}
 
 // NewLRU evicts the least recently used of the sampled candidates.
 func NewLRU(sampleSize int) Policy {
-	return &sampled{
-		name: "lru",
-		n:    sampleSize,
-		score: func(e *Entry, nowUS int64) float64 {
-			return float64(nowUS - e.lastAccess) // longest idle wins
-		},
-	}
+	return newSampled("lru", sampleSize, func(e *Entry, nowUS int64) float64 {
+		return float64(nowUS - e.lastAccess) // longest idle wins
+	})
 }
 
 // NewLFU evicts the least frequently used of the sampled candidates. No aging,
@@ -72,11 +88,7 @@ func NewLRU(sampleSize int) Policy {
 // ponytail: add a decay pass if this baseline ever needs to be competitive
 // rather than illustrative.
 func NewLFU(sampleSize int) Policy {
-	return &sampled{
-		name: "lfu",
-		n:    sampleSize,
-		score: func(e *Entry, _ int64) float64 {
-			return -float64(e.accesses)
-		},
-	}
+	return newSampled("lfu", sampleSize, func(e *Entry, _ int64) float64 {
+		return -float64(e.accesses)
+	})
 }

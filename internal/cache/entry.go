@@ -1,9 +1,12 @@
 package cache
 
-// HistoryLen is how many inter-access gaps each entry remembers. The LRB paper
-// keeps 32; 8 holds per-entry history to 32 bytes and costs little accuracy on
-// the workloads here. Raising it costs memory per cached object, not CPU.
-const HistoryLen = 8
+import "github.com/JustinK33/newproj/internal/features"
+
+// HistoryLen is how many inter-access gaps each entry remembers, and it is the
+// feature package's constant rather than its own number: the history an entry keeps
+// and the delta columns the model was trained on have to be the same length or the
+// learned policy reads garbage.
+const HistoryLen = features.HistoryLen
 
 // Entry is one cached object plus the metadata every policy scores it on.
 //
@@ -37,6 +40,7 @@ func (e *Entry) LastAccess() int64     { return e.lastAccess }
 func (e *Entry) Admitted() int64       { return e.admitted }
 func (e *Entry) Accesses() uint32      { return e.accesses }
 func (e *Entry) Age(nowUS int64) int64 { return nowUS - e.admitted }
+func (e *Entry) Frequency() uint8      { return e.freq }
 
 // Deltas returns a pointer so callers can read the history without copying 32
 // bytes on a path that runs once per eviction candidate.
