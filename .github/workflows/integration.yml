@@ -56,6 +56,34 @@ jobs:
       - name: Wait for health
         run: ./scripts/wait-for-health.sh
 
+      # A healthy Grafana with broken provisioning looks identical from the outside, and
+      # a healthy Prometheus with a target it cannot reach looks fine too. Both are
+      # exactly what a major version bump breaks, so assert the wiring rather than the
+      # process. Targets are polled because health is "unknown" until the first scrape.
+      - name: Assert the observability stack is wired up
+        run: |
+          url="http://localhost:${PROMETHEUS_PORT:-9091}/api/v1/targets?state=active"
+          for _ in $(seq 1 30); do
+            targets=$(curl -fsS "$url" || echo '{}')
+            total=$(jq '.data.activeTargets | length // 0' <<<"$targets")
+            down=$(jq '[.data.activeTargets[]? | select(.health != "up")] | length' <<<"$targets")
+            [ "$total" -eq 7 ] && [ "$down" -eq 0 ] && break
+            sleep 2
+          done
+          jq -r '.data.activeTargets[]? | "  " + .labels.job + " " + .scrapeUrl + " " + .health' <<<"$targets"
+          [ "$total" -eq 7 ] || { echo "prometheus has $total active targets, want 7" >&2; exit 1; }
+          [ "$down" -eq 0 ] || { echo "$down scrape targets are not up" >&2; exit 1; }
+
+          auth="${GRAFANA_ADMIN_USER:-admin}:${GRAFANA_ADMIN_PASSWORD:-admin}"
+          grafana="http://localhost:${GRAFANA_PORT:-3000}"
+          curl -fsS -u "$auth" "$grafana/api/datasources" |
+            jq -e 'any(.[]; .type == "prometheus")' >/dev/null ||
+            { echo "grafana provisioned no prometheus datasource" >&2; exit 1; }
+          curl -fsS -u "$auth" "$grafana/api/search?type=dash-db" |
+            jq -e 'length >= 1' >/dev/null ||
+            { echo "grafana provisioned no dashboard" >&2; exit 1; }
+          echo "7 targets up, grafana datasource and dashboard provisioned"
+
       # Phase one: the cluster serves traffic correctly with no model at all. The
       # learned policy falls back to sampled eviction until one arrives, so this also
       # checks that the fallback is not the thing that breaks.
