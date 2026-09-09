@@ -69,7 +69,10 @@ func Serve(ctx context.Context, addr string) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	go func() {
+	// The shutdown context below is deliberately not derived from ctx: ctx is already
+	// cancelled by the time this goroutine wakes, and a cancelled context gives
+	// Shutdown no grace period at all.
+	go func() { //nolint:gosec // G118, see above
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

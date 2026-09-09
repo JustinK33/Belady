@@ -9,6 +9,10 @@ linters:
     - unused
     - bodyclose
     - errorlint
+    # gosec runs here rather than as its own binary in CI so that one //nolint:gosec
+    # with a reason is enough. The standalone tool ignores nolint and needs #nosec,
+    # which means two annotations saying the same thing on the same line.
+    - gosec
     - misspell
     - nilerr
     - revive
@@ -16,6 +20,14 @@ linters:
     - usestdlibvars
 
   settings:
+    gosec:
+      excludes:
+        # G115 flags every narrowing or signedness change. Twenty-one of them here are
+        # shard indices, ring capacities, byte counters and tree node offsets, all
+        # bounded by values this process chose itself. Auditing them one by one is
+        # worth doing; failing the build on all of them teaches people to ignore gosec.
+        - G115
+
     govet:
       enable:
         - fieldalignment # hot-path structs pay for padding
@@ -35,11 +47,13 @@ linters:
     paths:
       - gen
     rules:
-      # Benchmarks and tests intentionally ignore returns and pack structs loosely.
+      # Benchmarks and tests intentionally ignore returns, pack structs loosely, seed
+      # their own PRNGs and read fixture files by path.
       - path: _test\.go
         linters:
           - errcheck
           - govet
+          - gosec
 
 formatters:
   enable:

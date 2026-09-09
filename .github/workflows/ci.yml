@@ -151,8 +151,7 @@ jobs:
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
-      - name: gosec
-        run: go run github.com/securego/gosec/v2/cmd/gosec@latest -exclude-generated ./...
-
+      # gosec is not here: it runs as part of golangci-lint, which respects the
+      # //nolint:gosec annotations the code already carries.
       - name: pip-audit
         run: make -C trainer audit

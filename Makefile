@@ -16,6 +16,12 @@ COMPOSE ?= docker compose -f deploy/compose.yaml $(COMPOSE_FLAGS)
 COMPOSE_DEV ?= docker compose -f deploy/compose.yaml -f deploy/compose.dev.yaml $(COMPOSE_FLAGS)
 SERVICES := gateway cachenode registry origin loadgen
 
+# Pinned so a local run and CI report the same findings. A newer staticcheck finds
+# things an older one does not, which shows up as a red build on a green working tree.
+# The same version is pinned in .github/workflows/ci.yml; move both together.
+GOLANGCI_VERSION := v2.13.2
+GOLANGCI := $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
+
 # The generated stubs record the versions that wrote them, so these are what makes
 # `make proto-check` a check on the protos rather than on whoever ran it last.
 PROTOC_VERSION := 35.0
@@ -47,12 +53,12 @@ bench-micro: ## Go microbenchmarks (model eval, store lookup, ring buffer)
 .PHONY: lint
 lint: ## Static analysis
 	$(GO) vet ./...
-	golangci-lint run
+	$(GOLANGCI) run
 
 .PHONY: fmt
 fmt: ## Format
 	$(GO) fmt ./...
-	golangci-lint fmt
+	$(GOLANGCI) fmt
 
 .PHONY: proto
 proto: ## Regenerate gRPC stubs from api/**/*.proto

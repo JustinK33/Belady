@@ -152,7 +152,7 @@ func (s *store) publish(meta *beladyv1.ModelMeta, body []byte) error {
 }
 
 func writeAtomic(path string, body []byte) error {
-	if err := os.WriteFile(path+tmpExt, body, 0o640); err != nil {
+	if err := os.WriteFile(path+tmpExt, body, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(path+tmpExt, path)

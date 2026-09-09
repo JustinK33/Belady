@@ -68,20 +68,29 @@ func (w *Watcher) Run(ctx context.Context) {
 	backoff := minBackoff
 
 	for ctx.Err() == nil {
-		if err := w.watch(ctx); err != nil && ctx.Err() == nil {
-			w.log.Warn("model watch dropped, retrying", "err", err, "in", backoff.String())
-			select {
-			case <-time.After(backoff):
-			case <-ctx.Done():
-				return
-			}
-			backoff = min(backoff*2, maxBackoff)
-			continue
+		started := time.Now()
+		err := w.watch(ctx) // Only ever returns because the stream ended, so err is never nil.
+		if ctx.Err() != nil {
+			return
 		}
-		backoff = minBackoff
+		// A stream that stayed up is not a failing endpoint. Without this the backoff
+		// only ever grows, so a node that reconnects once an hour ends up waiting the
+		// maximum for a registry that is perfectly healthy.
+		if time.Since(started) >= maxBackoff {
+			backoff = minBackoff
+		}
+		w.log.Warn("model watch dropped, retrying", "err", err, "in", backoff.String())
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return
+		}
+		backoff = min(backoff*2, maxBackoff)
 	}
 }
 
+// watch runs one stream to completion. It has no success case: it returns only when
+// the stream breaks or ctx is cancelled, so the error it returns is never nil.
 func (w *Watcher) watch(ctx context.Context) error {
 	// since is the installed version, so a reconnect does not re-download it and a
 	// node that restarts is caught up immediately by the registry.

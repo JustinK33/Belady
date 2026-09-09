@@ -68,7 +68,7 @@ func Load(r io.Reader) (*Model, error) {
 }
 
 func LoadFile(path string) (*Model, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // path comes from operator config or a test, never from a request
 	if err != nil {
 		return nil, err
 	}
