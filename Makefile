@@ -1,4 +1,8 @@
-.DEFAULT_GOAL := help
+# := set in stone
+# = lazy one and doesnt compute until used
+# ?= uses default value if there isnt one provided
+
+.DEFAULT_GOAL := help # this is what command runs if we just run "make" without any parameters
 SHELL := /bin/bash
 GO ?= go
 BIN := bin
