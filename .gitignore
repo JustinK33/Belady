@@ -1,0 +1,46 @@
+# Secrets - never commit real config
+.env
+.env.*
+!.env.example
+
+# Build output
+/bin/
+/dist/
+*.exe
+*.so
+*.dylib
+*.test
+*.out
+
+# Coverage and profiles
+coverage.txt
+coverage.html
+*.prof
+*.pprof
+cpu.out
+mem.out
+
+# Trained model blobs and captured traces (large, regenerable)
+/models/
+/traces/
+*.lgb
+*.trace.gz
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local docker volumes
+/deploy/observability/grafana/data/
