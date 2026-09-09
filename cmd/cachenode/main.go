@@ -22,6 +22,7 @@ import (
 	"github.com/JustinK33/newproj/internal/config"
 	"github.com/JustinK33/newproj/internal/grpcx"
 	"github.com/JustinK33/newproj/internal/obs"
+	"github.com/JustinK33/newproj/internal/registry"
 	"github.com/JustinK33/newproj/internal/trace"
 )
 
@@ -225,11 +226,33 @@ func main() {
 		nodeID: nodeID,
 	}
 
+	// The learned policy is the only one that needs a model, so the registry
+	// connection follows the policy rather than being wired up unconditionally.
+	boundary := config.Duration("MODEL_BOUNDARY", 10*time.Minute)
+	if models != nil {
+		addr := config.String("REGISTRY_ADDR", "")
+		if addr == "" {
+			// Not fatal: this is exactly the state of a fresh cluster, and running the
+			// fallback policy is the correct behaviour. It has to be loud, though,
+			// because a benchmark labelled "lrb" that never loaded a model is just LRU.
+			log.Warn("policy lrb is configured with no REGISTRY_ADDR, so no model will ever load")
+		} else {
+			rconn, err := grpcx.Dial(addr)
+			if err != nil {
+				log.Error("registry dial failed", "addr", addr, "err", err)
+				os.Exit(2)
+			}
+			defer func() { _ = rconn.Close() }()
+
+			go registry.NewWatcher(rconn, models, boundary, log).Run(ctx)
+		}
+	}
+
 	registerCacheMetrics(c, recorder)
 	_, perShard := c.Shape()
 	log.Info("cache node configured", "node_id", nodeID, "policy", policyName,
 		"capacity", capacity, "shards", shards, "per_shard_bytes", perShard,
-		"trace", recorder != nil)
+		"trace", recorder != nil, "model_boundary", boundary.String())
 
 	if recorder != nil {
 		// Run owns the segment files, so it has to finish its final flush before the

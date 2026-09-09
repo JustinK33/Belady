@@ -6,6 +6,12 @@
 # Build output
 /bin/
 /dist/
+# A bare `go build ./cmd/x` drops the binary in the repo root under the package name.
+/gateway
+/cachenode
+/registry
+/origin
+/loadgen
 *.exe
 *.so
 *.dylib
