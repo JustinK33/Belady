@@ -17,16 +17,21 @@ That constraint is the point: it forces flattened cache-friendly tree layouts, s
 ## Status
 
 The full loop works: the cluster serves traffic, samples access traces, trains a model from them, publishes it, and the cache nodes install it without a restart.
-Still to come are the Docker and Compose deployment, the CI workflows, and the prose in [docs/](docs/).
+It runs under Docker Compose with Prometheus and Grafana, and CI covers build, race tests, lint, generated-code drift, vulnerability scanning, and a Compose integration run gated on hit ratio and p99.
+Still to come is the prose in [docs/](docs/); the plan and the open questions are in [ROADMAP.md](ROADMAP.md).
 
 ## Quick start
 
 ```sh
-make up      # bring up the cluster with Docker Compose
+cp .env.example .env
+make up      # the cluster, Prometheus and Grafana, then wait for health
 make bench   # replay a Zipfian workload, report hit ratio and tail latency
 make train   # train a model from a captured trace and publish it
+make bench   # again, to see what the model changed
 make test    # unit tests with the race detector
 ```
+
+`make help` lists the rest.
 
 ## Measured results
 
@@ -107,6 +112,8 @@ That is now a refusal to start rather than a comment.
 - [Operations](docs/05-operations.md)
 - [Security](docs/06-security.md)
 - [Architecture decision records](docs/adr/)
+- [Roadmap and open questions](ROADMAP.md)
+- [Contributing](CONTRIBUTING.md) and [security policy](SECURITY.md)
 
 ## License
 
