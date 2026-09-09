@@ -266,6 +266,49 @@ func TestRecorderPublishesOnlyFinishedSegments(t *testing.T) {
 	}
 }
 
+// TestRecorderRotatesOnAge covers the failure mode that a segment sized for a busy
+// node never rotates on a quiet one, so the trainer sees a directory holding nothing
+// but an open .partial file and reports it as empty.
+func TestRecorderRotatesOnAge(t *testing.T) {
+	dir := t.TempDir()
+	r := newRecorder(t, Config{
+		Dir:           dir,
+		Shards:        1,
+		SegmentBytes:  1 << 30, // Far beyond what the handful of records below can fill.
+		FlushInterval: 5 * time.Millisecond,
+		SegmentMaxAge: 20 * time.Millisecond,
+	})
+
+	for i := range 10 {
+		r.Ring(0).Push(Record{KeyHash: uint64(i), SizeBytes: 64})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.Run(ctx) }()
+
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		segments, err := Segments(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(segments) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no segment was published, so age-based rotation is not happening")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReadDirRejectsAnEmptyDirectory(t *testing.T) {
 	if _, err := ReadDir(t.TempDir()); err == nil {
 		t.Error("reading a directory with no segments succeeded")

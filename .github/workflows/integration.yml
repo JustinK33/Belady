@@ -22,9 +22,12 @@ env:
   # The boundary the nodes are configured for. A node refuses a model trained against
   # a different one, so the trainer below has to be given the same value.
   MODEL_BOUNDARY: 1s
-  # Segments only become trainable once they rotate, so keep this well under what the
-  # smoke run produces or the trainer finds nothing but .partial files.
+  # Segments only become trainable once they rotate. A smoke run this short does not
+  # come close to filling a production-sized segment, so both bounds are turned down
+  # and every key is sampled rather than one in sixteen.
   TRACE_SEGMENT_BYTES: 256KiB
+  TRACE_SEGMENT_MAX_AGE: 5s
+  TRACE_SAMPLE_DENOMINATOR: 1
   ORIGIN_LATENCY: 200us
   ORIGIN_JITTER: 100us
   REQUESTS: 120000
@@ -64,6 +67,22 @@ jobs:
 
       # Phase two: the loop the whole project is about. Everything from here down is
       # asserting that a model trained from the traffic above actually reaches the nodes.
+      #
+      # A node publishes a segment on size, on age, or on clean shutdown, so the trainer
+      # sees nothing until the first rotation. Poll for it instead of sleeping, using the
+      # trainer image because it already has the volume mounted.
+      - name: Wait for a trace segment to be published
+        run: |
+          for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            listing=$(docker compose -f deploy/compose.yaml --profile train run --rm \
+              --entrypoint ls trainer -1 /var/lib/belady/traces)
+            echo "$listing"
+            if echo "$listing" | grep -q '[.]trace$'; then exit 0; fi
+            sleep 5
+          done
+          echo "no segment rotated, so the trainer would read an empty directory" >&2
+          exit 1
+
       - name: Report the reuse times in the captured trace
         run: docker compose -f deploy/compose.yaml --profile train run --rm trainer boundary
 

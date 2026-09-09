@@ -47,6 +47,11 @@ type Config struct {
 
 	SegmentBytes  int64
 	FlushInterval time.Duration
+	// SegmentMaxAge rotates an open segment on age as well as on size. Without it a
+	// node whose traffic never fills SegmentBytes publishes nothing until it shuts
+	// down, and the trainer correctly reports an empty directory. Age is the bound
+	// that matters to the trainer; size only bounds the file.
+	SegmentMaxAge time.Duration
 	BatchSize     int
 }
 
@@ -59,6 +64,7 @@ type Recorder struct {
 	scratch []Record
 	encoded []byte
 	path    string
+	opened  time.Time
 	batch   beladyv1.AccessBatch
 
 	cfg Config
@@ -88,6 +94,9 @@ func New(cfg Config, log *slog.Logger) (*Recorder, error) {
 	}
 	if cfg.FlushInterval <= 0 {
 		cfg.FlushInterval = time.Second
+	}
+	if cfg.SegmentMaxAge <= 0 {
+		cfg.SegmentMaxAge = time.Minute
 	}
 	if err := os.MkdirAll(cfg.Dir, 0o750); err != nil {
 		return nil, fmt.Errorf("trace: %w", err)
@@ -145,6 +154,11 @@ func (r *Recorder) Run(ctx context.Context) error {
 				// A failed write must not kill the cache. Log it, keep draining, and let
 				// the drop and written counters tell the operator the trace is incomplete.
 				r.log.Error("trace write failed", "err", err)
+			}
+			if r.file != nil && time.Since(r.opened) >= r.cfg.SegmentMaxAge {
+				if err := r.closeSegment(); err != nil {
+					r.log.Error("trace segment rotation failed", "err", err)
+				}
 			}
 		}
 	}
@@ -230,7 +244,7 @@ func (r *Recorder) ensureSegment() error {
 	if err != nil {
 		return err
 	}
-	r.file, r.size = f, 0
+	r.file, r.size, r.opened = f, 0, time.Now()
 	return nil
 }
 

@@ -22,6 +22,10 @@ from belady.v1 import trace_pb2
 
 EXTENSION = ".trace"
 
+# The suffix a cache node writes under before it publishes. Only used to explain an
+# empty directory, which is almost always a segment that has not rotated yet.
+PARTIAL_EXTENSION = ".partial"
+
 
 @dataclass(frozen=True)
 class Trace:
@@ -111,6 +115,14 @@ def load(directory: str) -> Trace:
     """
     paths = segments(directory)
     if not paths:
+        open_segments = glob.glob(os.path.join(directory, "*" + PARTIAL_EXTENSION))
+        if open_segments:
+            raise FileNotFoundError(
+                f"no {EXTENSION} segments in {directory}, but {len(open_segments)} "
+                f"{PARTIAL_EXTENSION} file(s) are still open: a segment publishes when "
+                "it reaches TRACE_SEGMENT_BYTES, when TRACE_SEGMENT_MAX_AGE elapses, or "
+                "when the node shuts down cleanly"
+            )
         raise FileNotFoundError(f"no {EXTENSION} segments in {directory}")
 
     keys: list[np.ndarray] = []

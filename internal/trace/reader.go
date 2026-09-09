@@ -68,6 +68,12 @@ func ReadDir(dir string) ([]*beladyv1.AccessBatch, error) {
 		return nil, err
 	}
 	if len(paths) == 0 {
+		// An open segment is the usual reason, and reporting only "empty" sends the
+		// reader looking for a lost trace instead of waiting for a rotation.
+		if partial, _ := filepath.Glob(filepath.Join(dir, "*"+tmpExtension)); len(partial) > 0 {
+			return nil, fmt.Errorf("no %s segments in %s, but %d %s file(s) are still open: they publish on rotation or clean shutdown",
+				Extension, dir, len(partial), tmpExtension)
+		}
 		return nil, fmt.Errorf("no %s segments in %s", Extension, dir)
 	}
 

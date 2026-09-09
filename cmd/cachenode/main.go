@@ -165,6 +165,7 @@ func newRecorder(nodeID string, shards int, log *slog.Logger) (*trace.Recorder, 
 		RingCapacity:      config.Int("TRACE_RING_CAPACITY", 8192),
 		SegmentBytes:      config.Bytes("TRACE_SEGMENT_BYTES", 32<<20),
 		FlushInterval:     config.Duration("TRACE_FLUSH_INTERVAL", time.Second),
+		SegmentMaxAge:     config.Duration("TRACE_SEGMENT_MAX_AGE", time.Minute),
 		BatchSize:         config.Int("TRACE_BATCH_SIZE", 4096),
 	}, log)
 }
