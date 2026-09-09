@@ -1,6 +1,10 @@
 package features
 
 import (
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -24,6 +28,62 @@ func TestNamesMatchTheLayout(t *testing.T) {
 	for _, n := range Names {
 		if strings.ContainsAny(n, " \t,") {
 			t.Errorf("column name %q contains whitespace or a comma", n)
+		}
+	}
+}
+
+// TestNamesMatchTheTrainer is the only guard against the two halves of the feature
+// contract drifting apart. The trainer cannot import this package and this package
+// cannot import the trainer, so the check is a parse of the Python source: crude, but
+// it fails the build, which no amount of documentation does.
+//
+// The failure it prevents is silent. Swap two columns and the model still loads, still
+// evaluates, and reads size_bytes wherever it was trained to read recency_ms.
+func TestNamesMatchTheTrainer(t *testing.T) {
+	path := filepath.Join("..", "..", "trainer", "belady_trainer", "columns.py")
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the trainer's column layout is unreadable, so the two sides cannot be compared: %v", err)
+	}
+
+	lenMatch := regexp.MustCompile(`(?m)^HISTORY_LEN = (\d+)$`).FindSubmatch(src)
+	if lenMatch == nil {
+		t.Fatalf("no HISTORY_LEN assignment in %s", path)
+	}
+	historyLen, err := strconv.Atoi(string(lenMatch[1]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if historyLen != HistoryLen {
+		t.Errorf("HISTORY_LEN is %d in the trainer and %d here", historyLen, HistoryLen)
+	}
+
+	block := regexp.MustCompile(`(?s)\nNAMES = \[(.*?)\n\]`).FindSubmatch(src)
+	if block == nil {
+		t.Fatalf("no NAMES list in %s", path)
+	}
+
+	// The trainer spells the scalar columns as plain string literals and generates the
+	// delta history from HISTORY_LEN, so rebuild the list the same way rather than
+	// trying to evaluate Python.
+	var names []string
+	for _, m := range regexp.MustCompile(`(?m)^\s+"([a-z0-9_]+)",$`).FindAllSubmatch(block[1], -1) {
+		names = append(names, string(m[1]))
+	}
+	if !strings.Contains(string(block[1]), `f"delta_{i}" for i in range(HISTORY_LEN)`) {
+		t.Fatalf("NAMES no longer generates the delta history from HISTORY_LEN:\n%s", block[1])
+	}
+	for i := range historyLen {
+		names = append(names, "delta_"+strconv.Itoa(i))
+	}
+
+	if len(names) != len(Names) {
+		t.Fatalf("the trainer declares %d columns %v, this package declares %d %v",
+			len(names), names, len(Names), Names)
+	}
+	for i := range Names {
+		if names[i] != Names[i] {
+			t.Errorf("column %d is %q in the trainer and %q here", i, names[i], Names[i])
 		}
 	}
 }

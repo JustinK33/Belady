@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "belady-trainer"
+version = "0.1.0"
+description = "Offline Relaxed Belady trainer for the Belady learned cache substrate"
+requires-python = ">=3.11"
+dependencies = [
+    "lightgbm>=4.5",
+    "numpy>=2.0",
+    "grpcio>=1.60",
+    "protobuf>=5.0",
+]
+
+[project.optional-dependencies]
+dev = ["grpcio-tools>=1.60", "pytest>=8.0", "ruff>=0.6", "pip-audit>=2.7"]
+
+[project.scripts]
+belady-trainer = "belady_trainer.__main__:main"
+
+[tool.setuptools]
+# belady/ holds the generated protobuf stubs and belady_trainer/ the actual code. The
+# stubs are generated with `--python_out=trainer`, which fixes their import path as
+# `belady.v1.*`, so they have to sit at the top level here rather than nested.
+packages = ["belady_trainer", "belady", "belady.v1"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Generated stubs are not ours to lint.
+extend-exclude = ["belady"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error"]
