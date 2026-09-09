@@ -14,9 +14,9 @@ import (
 )
 
 type Config struct {
-	// NewPolicy is called once per shard, so a policy may keep unsynchronised
-	// state.
-	NewPolicy func() Policy
+	// NewPolicy is called once per shard with that shard's byte capacity. Per
+	// shard, so a policy may keep unsynchronised state and never lock.
+	NewPolicy func(shardCapacityBytes int64) Policy
 
 	// NowUS and Nanos are injectable so tests can drive time without sleeping.
 	NowUS func() int64
@@ -126,10 +126,10 @@ func New(cfg Config) (*Cache, error) {
 		nowUS:  cfg.NowUS,
 		shards: make([]*shard, n),
 		mask:   uint64(n - 1),
-		policy: cfg.NewPolicy().Name(),
+		policy: cfg.NewPolicy(per).Name(),
 	}
 	for i := range c.shards {
-		c.shards[i] = newShard(per, cfg.SampleSize, cfg.NewPolicy(), cfg.Nanos)
+		c.shards[i] = newShard(per, cfg.SampleSize, cfg.NewPolicy(per), cfg.Nanos)
 	}
 	return c, nil
 }

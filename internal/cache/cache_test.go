@@ -14,7 +14,7 @@ type fakeClock struct{ us atomic.Int64 }
 
 func (c *fakeClock) nowUS() int64 { return c.us.Add(1000) }
 
-func newTestCache(t *testing.T, capacity int64, shards int, policy func() Policy) *Cache {
+func newTestCache(t *testing.T, capacity int64, shards int, policy func(int64) Policy) *Cache {
 	t.Helper()
 	clk := &fakeClock{}
 	c, err := New(Config{
@@ -32,7 +32,7 @@ func newTestCache(t *testing.T, capacity int64, shards int, policy func() Policy
 }
 
 func TestGetPutDelete(t *testing.T) {
-	c := newTestCache(t, 1<<20, 1, func() Policy { return NewLRU(5) })
+	c := newTestCache(t, 1<<20, 1, func(int64) Policy { return NewLRU(5) })
 
 	if _, ok := c.Get("absent"); ok {
 		t.Fatal("Get on empty cache reported a hit")
@@ -56,7 +56,7 @@ func TestGetPutDelete(t *testing.T) {
 }
 
 func TestOverwriteDoesNotLeakCapacity(t *testing.T) {
-	c := newTestCache(t, 1<<16, 1, func() Policy { return NewLRU(5) })
+	c := newTestCache(t, 1<<16, 1, func(int64) Policy { return NewLRU(5) })
 	for range 100 {
 		c.Put("k", make([]byte, 1000))
 	}
@@ -72,7 +72,7 @@ func TestOverwriteDoesNotLeakCapacity(t *testing.T) {
 func TestCapacityIsEnforced(t *testing.T) {
 	const capacity = 10_000
 	const valueSize = 100
-	c := newTestCache(t, capacity, 1, func() Policy { return NewLRU(5) })
+	c := newTestCache(t, capacity, 1, func(int64) Policy { return NewLRU(5) })
 
 	for i := range 500 {
 		c.Admit(fmt.Sprintf("key-%d", i), make([]byte, valueSize))
@@ -90,7 +90,7 @@ func TestCapacityIsEnforced(t *testing.T) {
 }
 
 func TestOversizedObjectIsRejectedNotThrashed(t *testing.T) {
-	c := newTestCache(t, 1000, 1, func() Policy { return NewLRU(5) })
+	c := newTestCache(t, 1000, 1, func(int64) Policy { return NewLRU(5) })
 	c.Put("small", make([]byte, 500))
 
 	if c.Put("huge", make([]byte, 2000)) {
@@ -107,7 +107,7 @@ func TestOversizedObjectIsRejectedNotThrashed(t *testing.T) {
 func TestLRUEvictsTheColdestSampledEntry(t *testing.T) {
 	// One shard, capacity for exactly three entries, sample the whole shard so the
 	// choice is deterministic rather than approximate.
-	c := newTestCache(t, 300, 1, func() Policy { return NewLRU(64) })
+	c := newTestCache(t, 300, 1, func(int64) Policy { return NewLRU(64) })
 
 	c.Put("a", make([]byte, 100))
 	c.Put("b", make([]byte, 100))
@@ -130,7 +130,7 @@ func TestLRUEvictsTheColdestSampledEntry(t *testing.T) {
 }
 
 func TestStatsRatios(t *testing.T) {
-	c := newTestCache(t, 1<<20, 1, func() Policy { return NewLRU(5) })
+	c := newTestCache(t, 1<<20, 1, func(int64) Policy { return NewLRU(5) })
 	c.Admit("a", make([]byte, 100))
 
 	for range 3 {
@@ -153,14 +153,14 @@ func TestStatsRatios(t *testing.T) {
 }
 
 func TestShardsAreRoundedToPowerOfTwo(t *testing.T) {
-	c := newTestCache(t, 1<<20, 100, func() Policy { return NewLRU(5) })
+	c := newTestCache(t, 1<<20, 100, func(int64) Policy { return NewLRU(5) })
 	if len(c.shards) != 128 {
 		t.Fatalf("shards = %d, want 128", len(c.shards))
 	}
 }
 
 func TestConcurrentAccessIsRaceFree(t *testing.T) {
-	c := newTestCache(t, 1<<16, 64, func() Policy { return NewLRU(5) })
+	c := newTestCache(t, 1<<16, 64, func(int64) Policy { return NewLRU(5) })
 
 	var wg sync.WaitGroup
 	for w := range 8 {
