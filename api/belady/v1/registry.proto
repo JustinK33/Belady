@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package belady.v1;
+
+option go_package = "github.com/JustinK33/newproj/gen/belady/v1;beladyv1";
+
+// Registry is the only thing the Python trainer and the Go cache nodes share at
+// runtime: the trainer pushes a model, the cache nodes watch for it and pull it.
+// Models are streamed in chunks because a LightGBM text dump grows with tree
+// count and easily exceeds a comfortable unary message size.
+service Registry {
+  rpc PublishModel(stream PublishModelRequest) returns (PublishModelResponse);
+  rpc GetModel(GetModelRequest) returns (stream GetModelResponse);
+  rpc WatchModels(WatchModelsRequest) returns (stream ModelEvent);
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+}
+
+message ModelMeta {
+  // Sortable version, e.g. "20260909T120000Z". Lexical order is deployment order.
+  string version = 1;
+  // Currently only "lightgbm-text".
+  string format = 2;
+  uint64 size_bytes = 3;
+  string sha256 = 4;
+  int64 created_unix = 5;
+  uint32 feature_count = 6;
+  // Relaxed Belady boundary, in seconds, that labelled the training set. A cache
+  // node refuses a model whose boundary disagrees with its own configuration,
+  // because the prediction would mean something different from what it assumes.
+  uint32 boundary_seconds = 7;
+  // Free-form training metrics: auc, logloss, n_samples, and so on.
+  map<string, string> metrics = 8;
+}
+
+message PublishModelRequest {
+  // The first message must carry meta; every later message carries a chunk.
+  oneof payload {
+    ModelMeta meta = 1;
+    bytes chunk = 2;
+  }
+}
+
+message PublishModelResponse {
+  ModelMeta meta = 1;
+}
+
+message GetModelRequest {
+  // Empty version means "the newest".
+  string version = 1;
+}
+
+message GetModelResponse {
+  oneof payload {
+    ModelMeta meta = 1;
+    bytes chunk = 2;
+  }
+}
+
+message WatchModelsRequest {
+  // The watcher's current version. The registry sends an event immediately if a
+  // newer model already exists, so a restarting node does not have to wait for
+  // the next training run.
+  string since_version = 1;
+}
+
+message ModelEvent {
+  ModelMeta meta = 1;
+}
+
+message ListModelsRequest {
+  uint32 limit = 1;
+}
+
+message ListModelsResponse {
+  // Newest first.
+  repeated ModelMeta models = 1;
+}

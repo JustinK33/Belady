@@ -1,0 +1,105 @@
+syntax = "proto3";
+
+package belady.v1;
+
+option go_package = "github.com/JustinK33/newproj/gen/belady/v1;beladyv1";
+
+// Cache is implemented by both the gateway and the cache nodes. The gateway is a
+// routing proxy in front of the same interface, so a client can talk to either
+// one and a cache node can be exercised directly in tests.
+service Cache {
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Put(PutRequest) returns (PutResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc Stats(StatsRequest) returns (StatsResponse);
+}
+
+enum Source {
+  SOURCE_UNSPECIFIED = 0;
+  SOURCE_CACHE = 1;
+  SOURCE_ORIGIN = 2;
+}
+
+message GetRequest {
+  string key = 1;
+}
+
+message GetResponse {
+  bytes value = 1;
+  // found is false only when the object exists in neither the cache nor origin.
+  bool found = 2;
+  Source source = 3;
+  // served_by names the cache node that handled the request, so routing can be
+  // inspected from the client side.
+  string served_by = 4;
+}
+
+message PutRequest {
+  string key = 1;
+  bytes value = 2;
+}
+
+message PutResponse {
+  // admitted is false when the admission policy declined to cache the object,
+  // for example because it is larger than a single shard's budget.
+  bool admitted = 1;
+  string served_by = 2;
+}
+
+message DeleteRequest {
+  string key = 1;
+}
+
+message DeleteResponse {
+  bool existed = 1;
+}
+
+message StatsRequest {}
+
+// StatsResponse carries the counters needed to score a policy. Object hit ratio
+// comes from hits/(hits+misses); byte hit ratio from hit_bytes/(hit_bytes+miss_bytes).
+// The two diverge whenever object sizes are skewed, which is the usual case.
+message StatsResponse {
+  string node_id = 1;
+  string policy = 2;
+  string model_version = 3;
+
+  uint64 hits = 4;
+  uint64 misses = 5;
+  uint64 hit_bytes = 6;
+  uint64 miss_bytes = 7;
+
+  uint64 admissions = 8;
+  uint64 rejections = 9;
+  uint64 evictions = 10;
+
+  uint64 objects = 11;
+  uint64 bytes_used = 12;
+  uint64 bytes_capacity = 13;
+
+  // Records sampled into the trace ring, and records dropped because the ring
+  // was full. A nonzero drop count means the shipper is behind, not that
+  // requests were harmed.
+  uint64 trace_sampled = 14;
+  uint64 trace_dropped = 15;
+
+  // Mean nanoseconds spent choosing a victim. This is the number the learned
+  // policy has to keep small enough to be worth its hit-ratio gain.
+  uint64 evict_ns_mean = 16;
+}
+
+// Origin stands in for whatever the cache fronts: a database, an object store,
+// another cache tier. The bundled implementation is a fixture with configurable
+// latency and value sizes so the system runs with no external dependency.
+service Origin {
+  rpc Fetch(FetchRequest) returns (FetchResponse);
+}
+
+message FetchRequest {
+  string key = 1;
+}
+
+message FetchResponse {
+  bytes value = 1;
+  bool found = 2;
+}

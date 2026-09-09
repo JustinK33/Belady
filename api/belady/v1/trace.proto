@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package belady.v1;
+
+option go_package = "github.com/JustinK33/newproj/gen/belady/v1;beladyv1";
+
+// This file defines no service. Cache nodes write access traces as
+// length-delimited AccessBatch messages to segment files on a shared volume, and
+// the trainer reads them offline. Training is a batch job that runs minutes
+// behind the workload, so a network stream would buy nothing and cost a service.
+// See docs/adr/0004-trace-capture-via-segment-files.md.
+
+message AccessRecord {
+  // 64-bit key hash rather than the key itself: the trainer never needs the
+  // plaintext key, and hashing keeps PII out of training data by construction.
+  uint64 key_hash = 1;
+
+  // Microseconds since the Unix epoch. Microsecond resolution is enough to order
+  // accesses and to compute inter-arrival deltas, and it halves the varint width
+  // compared with nanoseconds.
+  int64 timestamp_us = 2;
+
+  uint32 size_bytes = 3;
+  bool hit = 4;
+}
+
+message AccessBatch {
+  string node_id = 1;
+  uint64 sequence = 2;
+  repeated AccessRecord records = 3;
+}
