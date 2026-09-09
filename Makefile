@@ -12,6 +12,12 @@ COMPOSE ?= docker compose -f deploy/compose.yaml $(COMPOSE_FLAGS)
 COMPOSE_DEV ?= docker compose -f deploy/compose.yaml -f deploy/compose.dev.yaml $(COMPOSE_FLAGS)
 SERVICES := gateway cachenode registry origin loadgen
 
+# The generated stubs record the versions that wrote them, so these are what makes
+# `make proto-check` a check on the protos rather than on whoever ran it last.
+PROTOC_VERSION := 35.0
+PROTOC_GEN_GO_VERSION := v1.36.12
+PROTOC_GEN_GO_GRPC_VERSION := v1.6.2
+
 .PHONY: help
 help: ## List targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  \033[1m%-16s\033[0m %s\n", $$1, $$2}'
@@ -46,8 +52,11 @@ fmt: ## Format
 
 .PHONY: proto
 proto: ## Regenerate gRPC stubs from api/**/*.proto
-	@command -v protoc-gen-go >/dev/null || $(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-	@command -v protoc-gen-go-grpc >/dev/null || $(GO) install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+	@$(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+	@$(GO) install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
+	@have=$$(protoc --version | awk '{print $$2}'); \
+	 [ "$$have" = "$(PROTOC_VERSION)" ] || \
+	 echo "warning: protoc $$have, but the committed stubs were written by $(PROTOC_VERSION); proto-check will report drift that is only a version header"
 	PATH="$$($(GO) env GOPATH)/bin:$$PATH" protoc \
 		--proto_path=api \
 		--go_out=gen --go_opt=paths=source_relative \

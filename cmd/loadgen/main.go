@@ -33,6 +33,12 @@ type options struct {
 	concurrency int
 	warmup      int
 	zipfS       float64
+
+	// Optional thresholds. Zero means no gate, which is what you want locally; CI
+	// sets them so a policy or hot-path regression fails the build instead of
+	// scrolling past in the report.
+	minObjectHit float64
+	maxP99       time.Duration
 }
 
 func main() {
@@ -43,6 +49,9 @@ func main() {
 		concurrency: config.Int("CONCURRENCY", 64),
 		warmup:      config.Int("WARMUP", 20_000),
 		zipfS:       config.Float("ZIPF_S", 1.1),
+
+		minObjectHit: config.Float("MIN_OBJECT_HIT", 0),
+		maxP99:       config.Duration("MAX_P99", 0),
 	}
 	if opts.zipfS <= 1 {
 		fmt.Fprintln(os.Stderr, "ZIPF_S must be greater than 1")
@@ -93,7 +102,32 @@ func main() {
 		os.Exit(1)
 	}
 
-	report(opts, trace, res, delta(before, after), elapsed)
+	sd := delta(before, after)
+	report(opts, trace, res, sd, elapsed)
+
+	if !withinThresholds(opts, res, sd) {
+		os.Exit(1)
+	}
+}
+
+// withinThresholds is the perf gate. It lives here rather than in a Go test because
+// it needs a running cluster, and it reports every violation rather than the first,
+// so one CI run tells you whether the hit ratio moved, the tail moved, or both.
+func withinThresholds(opts options, res *results, sd serverDelta) bool {
+	ok := true
+	if opts.minObjectHit > 0 {
+		if got := ratio(sd.hits, sd.hits+sd.misses); got < opts.minObjectHit {
+			fmt.Fprintf(os.Stderr, "FAIL object hit %.4f is below the MIN_OBJECT_HIT floor of %.4f\n", got, opts.minObjectHit)
+			ok = false
+		}
+	}
+	if opts.maxP99 > 0 {
+		if got := res.quantile(0.99); got > opts.maxP99 {
+			fmt.Fprintf(os.Stderr, "FAIL p99 %s is above the MAX_P99 ceiling of %s\n", got, opts.maxP99)
+			ok = false
+		}
+	}
+	return ok
 }
 
 // generateTrace draws keys from a Zipf distribution. Web popularity is

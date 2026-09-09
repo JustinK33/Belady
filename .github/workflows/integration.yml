@@ -1,0 +1,96 @@
+name: integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # A small cache against a keyspace it cannot hold, so eviction actually runs. With
+  # capacity above the working set every policy scores the same and the gate is noise.
+  CACHE_CAPACITY: 4MiB
+  CACHE_SHARDS: 16
+  CACHE_POLICY: lrb
+  # The boundary the nodes are configured for. A node refuses a model trained against
+  # a different one, so the trainer below has to be given the same value.
+  MODEL_BOUNDARY: 1s
+  # Segments only become trainable once they rotate, so keep this well under what the
+  # smoke run produces or the trainer finds nothing but .partial files.
+  TRACE_SEGMENT_BYTES: 256KiB
+  ORIGIN_LATENCY: 200us
+  ORIGIN_JITTER: 100us
+  REQUESTS: 120000
+  KEYSPACE: 20000
+  CONCURRENCY: 32
+  WARMUP: 20000
+
+jobs:
+  smoke:
+    name: compose up, replay, train, roll out
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Bring up the cluster
+        run: docker compose -f deploy/compose.yaml up -d --build
+
+      - name: Wait for health
+        run: ./scripts/wait-for-health.sh
+
+      # Phase one: the cluster serves traffic correctly with no model at all. The
+      # learned policy falls back to sampled eviction until one arrives, so this also
+      # checks that the fallback is not the thing that breaks.
+      - name: Replay a workload
+        env:
+          MIN_OBJECT_HIT: "0.60"
+          MAX_P99: 100ms
+        run: go run ./cmd/loadgen
+
+      # Phase two: the loop the whole project is about. Everything from here down is
+      # asserting that a model trained from the traffic above actually reaches the nodes.
+      - name: Report the reuse times in the captured trace
+        run: docker compose -f deploy/compose.yaml --profile train run --rm trainer boundary
+
+      - name: Train and publish
+        run: docker compose -f deploy/compose.yaml --profile train run --rm trainer train
+
+      - name: Assert every node installed the model
+        run: |
+          sleep 5
+          for port in 9201 9202 9203; do
+            loads=$(curl -fsS "http://localhost:$port/metrics" | awk '/^belady_model_loads_total /{print $2}')
+            failures=$(curl -fsS "http://localhost:$port/metrics" | awk '/^belady_model_load_failures_total /{print $2}')
+            echo "port $port: ${loads:-0} loads, ${failures:-0} failures"
+            [ "${loads%%.*}" -ge 1 ] || { echo "no model installed on port $port" >&2; exit 1; }
+            [ "${failures%%.*}" -eq 0 ] || { echo "a model was rejected on port $port" >&2; exit 1; }
+          done
+
+      - name: Replay again with the learned policy
+        env:
+          MIN_OBJECT_HIT: "0.60"
+          MAX_P99: 100ms
+        run: go run ./cmd/loadgen
+
+      - name: Cluster logs
+        if: failure()
+        run: docker compose -f deploy/compose.yaml --profile train logs --no-color --tail 400
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f deploy/compose.yaml --profile train down -v --remove-orphans

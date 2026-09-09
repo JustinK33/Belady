@@ -1,0 +1,95 @@
+name: docker
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  images:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: gateway
+            dockerfile: deploy/docker/go.Dockerfile
+            service: gateway
+            platforms: linux/amd64,linux/arm64
+          - name: cachenode
+            dockerfile: deploy/docker/go.Dockerfile
+            service: cachenode
+            platforms: linux/amd64,linux/arm64
+          - name: registry
+            dockerfile: deploy/docker/go.Dockerfile
+            service: registry
+            platforms: linux/amd64,linux/arm64
+          - name: origin
+            dockerfile: deploy/docker/go.Dockerfile
+            service: origin
+            platforms: linux/amd64,linux/arm64
+          # amd64 only: the Go images cross-compile for free, but the trainer installs
+          # LightGBM's wheel, and doing that for arm64 means pip under QEMU emulation.
+          - name: trainer
+            dockerfile: deploy/docker/trainer.Dockerfile
+            service: ""
+            platforms: linux/amd64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
+        if: contains(matrix.platforms, 'arm64')
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/belady-${{ matrix.name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
+          build-args: |
+            SERVICE=${{ matrix.service }}
+            VERSION=${{ github.ref_name }}-${{ github.sha }}
+          # Pull requests build but do not publish. The build is the useful signal;
+          # publishing from an untrusted branch is not.
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}

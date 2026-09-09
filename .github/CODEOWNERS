@@ -1,0 +1,14 @@
+*                               @JustinK33
+
+# The two halves of the feature contract and the model parser. Changing one of these
+# without the other is the failure mode this repo is most exposed to.
+/internal/features/             @JustinK33
+/internal/model/                @JustinK33
+/trainer/belady_trainer/        @JustinK33
+
+# Generated. Regenerate with `make proto` and `make -C trainer proto`.
+/gen/                           @JustinK33
+/trainer/belady/                @JustinK33
+
+/.github/                       @JustinK33
+/deploy/                        @JustinK33

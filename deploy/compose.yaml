@@ -2,7 +2,7 @@ name: belady
 
 x-go-build: &go-build
   context: ..
-  dockerfile: deploy/docker/Dockerfile.go
+  dockerfile: deploy/docker/go.Dockerfile
 
 x-hardening: &hardening
   init: true
@@ -151,7 +151,7 @@ services:
       - /tmp:size=512m,mode=1777
     build:
       context: ..
-      dockerfile: deploy/docker/Dockerfile.trainer
+      dockerfile: deploy/docker/trainer.Dockerfile
     image: belady/trainer:dev
     command:
       - train

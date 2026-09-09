@@ -1,0 +1,63 @@
+version: 2
+
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # grpc and protobuf move together and a partial bump usually will not build.
+      grpc:
+        patterns:
+          - google.golang.org/grpc
+          - google.golang.org/protobuf
+          - google.golang.org/genproto*
+
+  - package-ecosystem: pip
+    directory: /trainer
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    # Bumping either of these rewrites committed artefacts, so they get their own PR
+    # rather than riding along with a dependency update.
+    groups:
+      codegen:
+        patterns:
+          - grpcio-tools
+          - ruff
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: docker
+    directories:
+      - /deploy/docker
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(deploy)"
+
+  - package-ecosystem: docker-compose
+    directory: /deploy
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(deploy)"
