@@ -164,7 +164,9 @@ func main() {
 	srv := &server{cache: c, origin: beladyv1.NewOriginClient(conn), nodeID: nodeID}
 
 	registerCacheMetrics(c)
-	log.Info("cache node configured", "node_id", nodeID, "policy", policyName, "capacity", capacity)
+	shards, perShard := c.Shape()
+	log.Info("cache node configured", "node_id", nodeID, "policy", policyName,
+		"capacity", capacity, "shards", shards, "per_shard_bytes", perShard)
 
 	go func() {
 		if err := obs.Serve(ctx, config.String("DEBUG_ADDR", ":9090")); err != nil {

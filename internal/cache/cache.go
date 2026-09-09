@@ -162,6 +162,13 @@ func (c *Cache) Delete(key string) bool {
 
 func (c *Cache) Policy() string { return c.policy }
 
+// Shape reports the shard count and each shard's byte capacity. Worth surfacing at
+// startup: shards divide capacity, so an object larger than one shard's share is
+// rejected outright no matter how much total room the cache has.
+func (c *Cache) Shape() (shards int, perShardBytes int64) {
+	return len(c.shards), c.shards[0].capacity
+}
+
 // Hash is FNV-1a followed by a splitmix64 finalizer. It has to be stable across
 // processes, because the gateway picks a node from it, the shard index comes from
 // its low bits, and it is the object's identity in the access trace. FNV alone
