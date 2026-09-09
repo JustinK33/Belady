@@ -1,6 +1,10 @@
 package cache
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/JustinK33/newproj/internal/trace"
+)
 
 // shard is an independently locked slice of the keyspace. Everything that
 // matters for concurrency happens here: there is no cache-wide lock, and no
@@ -14,6 +18,11 @@ type shard struct {
 	m      map[uint64]*Entry
 	policy Policy
 	nanos  func() int64 // monotonic nanoseconds, injectable so tests stay fast
+
+	// ring is this shard's slice of the access trace, or nil when tracing is off.
+	// Pushing here is why the ring can be single-producer: the shard lock is already
+	// held, so no two goroutines are ever in it at once.
+	ring *trace.Ring
 
 	used     int64
 	capacity int64
@@ -30,14 +39,25 @@ type shard struct {
 	mu sync.Mutex
 }
 
-func newShard(capacity int64, sample int, policy Policy, nanos func() int64) *shard {
+func newShard(capacity int64, sample int, policy Policy, nanos func() int64, ring *trace.Ring) *shard {
 	return &shard{
 		m:        make(map[uint64]*Entry),
 		policy:   policy,
 		nanos:    nanos,
+		ring:     ring,
 		capacity: capacity,
 		sample:   sample,
 	}
+}
+
+// record appends to the access trace. Exactly one record is written per request: a
+// hit records here, and a miss records from insert once the object's size is known,
+// so the trainer sees every access with a real size and never a duplicate.
+func (s *shard) record(key uint64, nowUS int64, size uint32, hit bool) {
+	if s.ring == nil {
+		return
+	}
+	s.ring.Push(trace.Record{KeyHash: key, TimestampUS: nowUS, SizeBytes: size, Hit: hit})
 }
 
 // Sample walks a randomised subset of the shard. Go randomises the starting
@@ -80,6 +100,7 @@ func (s *shard) get(key uint64, nowUS int64) ([]byte, bool) {
 	s.policy.OnAccess(e)
 	s.hits++
 	s.hitBytes += uint64(e.size)
+	s.record(key, nowUS, uint32(e.size), true)
 	return e.value, true
 }
 
@@ -129,6 +150,9 @@ func (s *shard) insert(key uint64, value []byte, nowUS int64, onMiss bool) bool 
 	s.used += size
 	s.policy.OnAdmit(e)
 	s.admissions++
+	if onMiss {
+		s.record(key, nowUS, uint32(size), false)
+	}
 	return true
 }
 

@@ -177,7 +177,7 @@ func TestLRBEvictionDoesNotAllocate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := newShard(4096, 8, NewLRB(holder, 8), func() int64 { return 0 })
+	s := newShard(4096, 8, NewLRB(holder, 8), func() int64 { return 0 }, nil)
 	for i := range 40 {
 		s.insert(uint64(i), make([]byte, 100), int64(i)*1000, false)
 	}
@@ -202,7 +202,7 @@ func BenchmarkLRBVictim(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	s := newShard(1<<20, 8, NewLRB(holder, 8), func() int64 { return 0 })
+	s := newShard(1<<20, 8, NewLRB(holder, 8), func() int64 { return 0 }, nil)
 	for i := range 4096 {
 		s.insert(uint64(i), make([]byte, 200), int64(i)*1000, false)
 	}

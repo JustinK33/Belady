@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"math/bits"
 	"time"
+
+	"github.com/JustinK33/newproj/internal/trace"
 )
 
 type Config struct {
@@ -21,6 +23,11 @@ type Config struct {
 	// NowUS and Nanos are injectable so tests can drive time without sleeping.
 	NowUS func() int64
 	Nanos func() int64
+
+	// Trace, when set, receives one access record per request. Each shard takes its
+	// own ring from it, which is what keeps the producer side lock-free, so it must
+	// have been built with RoundShards(Shards) rings.
+	Trace *trace.Recorder
 
 	CapacityBytes int64
 	// Shards is rounded up to a power of two so shard selection is a mask.
@@ -96,6 +103,17 @@ func (c *Cache) Snapshot() Stats {
 	return st
 }
 
+// RoundShards reports the shard count a Config will actually use. Shard selection
+// masks the hash instead of dividing it, so the count has to be a power of two.
+// Exported because anything sized per shard, the trace recorder in particular, has
+// to agree with the cache rather than with what the operator typed.
+func RoundShards(n int) int {
+	if n <= 0 {
+		return 256
+	}
+	return 1 << bits.Len(uint(n-1))
+}
+
 func New(cfg Config) (*Cache, error) {
 	if cfg.CapacityBytes <= 0 {
 		return nil, errors.New("cache: capacity must be positive")
@@ -116,10 +134,14 @@ func New(cfg Config) (*Cache, error) {
 		cfg.Nanos = func() int64 { return time.Now().UnixNano() }
 	}
 
-	n := 1 << bits.Len(uint(cfg.Shards-1))
+	n := RoundShards(cfg.Shards)
 	per := cfg.CapacityBytes / int64(n)
 	if per <= 0 {
 		return nil, fmt.Errorf("cache: %d bytes across %d shards leaves nothing per shard", cfg.CapacityBytes, n)
+	}
+	if cfg.Trace != nil && cfg.Trace.Shards() != n {
+		return nil, fmt.Errorf("cache: trace recorder has %d rings but the cache uses %d shards; build it with RoundShards(shards)",
+			cfg.Trace.Shards(), n)
 	}
 
 	c := &Cache{
@@ -129,7 +151,11 @@ func New(cfg Config) (*Cache, error) {
 		policy: cfg.NewPolicy(per).Name(),
 	}
 	for i := range c.shards {
-		c.shards[i] = newShard(per, cfg.SampleSize, cfg.NewPolicy(per), cfg.Nanos)
+		var ring *trace.Ring
+		if cfg.Trace != nil {
+			ring = cfg.Trace.Ring(i)
+		}
+		c.shards[i] = newShard(per, cfg.SampleSize, cfg.NewPolicy(per), cfg.Nanos, ring)
 	}
 	return c, nil
 }

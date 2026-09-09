@@ -5,10 +5,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"runtime/debug"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sync/singleflight"
@@ -20,6 +22,7 @@ import (
 	"github.com/JustinK33/newproj/internal/config"
 	"github.com/JustinK33/newproj/internal/grpcx"
 	"github.com/JustinK33/newproj/internal/obs"
+	"github.com/JustinK33/newproj/internal/trace"
 )
 
 type server struct {
@@ -27,6 +30,12 @@ type server struct {
 
 	cache  *cache.Cache
 	origin beladyv1.OriginClient
+
+	// models is nil unless the learned policy is configured. Stats reads the live
+	// version from it so a hit ratio can never be attributed to a model that was
+	// not actually installed.
+	models *cache.ModelHolder
+	trace  *trace.Recorder
 
 	// fetches collapses concurrent misses for the same key into one origin call.
 	// Without it, a key expiring under load produces one origin request per
@@ -86,9 +95,20 @@ func (s *server) Delete(_ context.Context, req *beladyv1.DeleteRequest) (*belady
 
 func (s *server) Stats(context.Context, *beladyv1.StatsRequest) (*beladyv1.StatsResponse, error) {
 	st := s.cache.Snapshot()
+	var version string
+	if s.models != nil {
+		version = s.models.Version()
+	}
+	var sampled, dropped uint64
+	if s.trace != nil {
+		sampled, dropped = s.trace.Stats()
+	}
 	return &beladyv1.StatsResponse{
 		NodeId:        s.nodeID,
 		Policy:        st.Policy,
+		ModelVersion:  version,
+		TraceSampled:  sampled,
+		TraceDropped:  dropped,
 		Hits:          st.Hits,
 		Misses:        st.Misses,
 		HitBytes:      st.HitBytes,
@@ -103,21 +123,49 @@ func (s *server) Stats(context.Context, *beladyv1.StatsRequest) (*beladyv1.Stats
 	}, nil
 }
 
-// newPolicy maps the configured name to a constructor. An unknown name is fatal
-// rather than defaulted: silently running LRU while a dashboard claims the
-// learned policy is worse than crashing.
-func newPolicy(name string) (func(int64) cache.Policy, error) {
+// newPolicy maps the configured name to a constructor, returning the model holder
+// as well when the learned policy needs one. An unknown name is fatal rather than
+// defaulted: silently running LRU while a dashboard claims the learned policy is
+// worse than crashing.
+func newPolicy(name string) (func(int64) cache.Policy, *cache.ModelHolder, error) {
 	sample := config.Int("CACHE_SAMPLE_SIZE", 8)
 	switch name {
 	case "lru":
-		return func(int64) cache.Policy { return cache.NewLRU(sample) }, nil
+		return func(int64) cache.Policy { return cache.NewLRU(sample) }, nil, nil
 	case "lfu":
-		return func(int64) cache.Policy { return cache.NewLFU(sample) }, nil
+		return func(int64) cache.Policy { return cache.NewLFU(sample) }, nil, nil
 	case "s3fifo":
-		return cache.NewS3FIFO, nil
+		return cache.NewS3FIFO, nil, nil
+	case "lrb":
+		// One holder shared by every shard: installing a model is a single pointer
+		// store, so a rollout never has to touch a shard lock.
+		holder := cache.NewModelHolder()
+		return func(int64) cache.Policy { return cache.NewLRB(holder, sample) }, holder, nil
 	default:
-		return nil, fmt.Errorf("unknown CACHE_POLICY %q: want lru, lfu or s3fifo", name)
+		return nil, nil, fmt.Errorf("unknown CACHE_POLICY %q: want lru, lfu, s3fifo or lrb", name)
 	}
+}
+
+// newRecorder builds the access-trace recorder, or returns nil when tracing is off.
+//
+// Off by default because it writes files: a node should not start filling a disk
+// because nobody set a variable. The training pipeline turns it on explicitly.
+func newRecorder(nodeID string, shards int, log *slog.Logger) (*trace.Recorder, error) {
+	if !config.Bool("TRACE_ENABLED", false) {
+		return nil, nil
+	}
+	return trace.New(trace.Config{
+		Dir:    config.String("TRACE_DIR", "/var/lib/belady/traces"),
+		NodeID: nodeID,
+		Shards: shards,
+		// One key in N, not one request in N. See trace.Ring.Push for why that
+		// distinction decides whether the labels come out right.
+		SampleDenominator: config.Int("TRACE_SAMPLE_DENOMINATOR", 16),
+		RingCapacity:      config.Int("TRACE_RING_CAPACITY", 8192),
+		SegmentBytes:      config.Bytes("TRACE_SEGMENT_BYTES", 32<<20),
+		FlushInterval:     config.Duration("TRACE_FLUSH_INTERVAL", time.Second),
+		BatchSize:         config.Int("TRACE_BATCH_SIZE", 4096),
+	}, log)
 }
 
 func main() {
@@ -126,9 +174,17 @@ func main() {
 	defer stop()
 
 	policyName := config.String("CACHE_POLICY", "lru")
-	mkPolicy, err := newPolicy(policyName)
+	mkPolicy, models, err := newPolicy(policyName)
 	if err != nil {
 		log.Error("bad configuration", "err", err)
+		os.Exit(2)
+	}
+
+	nodeID := config.String("NODE_ID", hostnameOr("cachenode"))
+	shards := cache.RoundShards(config.Int("CACHE_SHARDS", 256))
+	recorder, err := newRecorder(nodeID, shards, log)
+	if err != nil {
+		log.Error("trace recorder init failed", "err", err)
 		os.Exit(2)
 	}
 
@@ -145,8 +201,9 @@ func main() {
 	c, err := cache.New(cache.Config{
 		NewPolicy:     mkPolicy,
 		CapacityBytes: capacity,
-		Shards:        config.Int("CACHE_SHARDS", 256),
+		Shards:        shards,
 		SampleSize:    config.Int("CACHE_SAMPLE_SIZE", 8),
+		Trace:         recorder,
 	})
 	if err != nil {
 		log.Error("cache init failed", "err", err)
@@ -160,13 +217,32 @@ func main() {
 	}
 	defer func() { _ = conn.Close() }()
 
-	nodeID := config.String("NODE_ID", hostnameOr("cachenode"))
-	srv := &server{cache: c, origin: beladyv1.NewOriginClient(conn), nodeID: nodeID}
+	srv := &server{
+		cache:  c,
+		origin: beladyv1.NewOriginClient(conn),
+		models: models,
+		trace:  recorder,
+		nodeID: nodeID,
+	}
 
-	registerCacheMetrics(c)
-	shards, perShard := c.Shape()
+	registerCacheMetrics(c, recorder)
+	_, perShard := c.Shape()
 	log.Info("cache node configured", "node_id", nodeID, "policy", policyName,
-		"capacity", capacity, "shards", shards, "per_shard_bytes", perShard)
+		"capacity", capacity, "shards", shards, "per_shard_bytes", perShard,
+		"trace", recorder != nil)
+
+	if recorder != nil {
+		// Run owns the segment files, so it has to finish its final flush before the
+		// process exits or the last segment is left as a .partial nobody reads.
+		traceDone := make(chan struct{})
+		go func() {
+			defer close(traceDone)
+			if err := recorder.Run(ctx); err != nil {
+				log.Error("trace recorder stopped", "err", err)
+			}
+		}()
+		defer func() { <-traceDone }()
+	}
 
 	go func() {
 		if err := obs.Serve(ctx, config.String("DEBUG_ADDR", ":9090")); err != nil {
@@ -184,7 +260,7 @@ func main() {
 // registerCacheMetrics publishes the store's counters as gauges read on scrape.
 // Collecting on demand keeps the request path free of metric updates; the store
 // already counts these under a lock it was holding anyway.
-func registerCacheMetrics(c *cache.Cache) {
+func registerCacheMetrics(c *cache.Cache, rec *trace.Recorder) {
 	desc := func(name, help string) *prometheus.Desc {
 		return prometheus.NewDesc("belady_cache_"+name, help, nil, nil)
 	}
@@ -204,10 +280,21 @@ func registerCacheMetrics(c *cache.Cache) {
 		{desc("evict_ns_mean", "Mean nanoseconds to choose a victim, including one clock read."), func(s cache.Stats) float64 { return float64(s.EvictNSMean) }},
 	}
 
+	// Trace counters come from the recorder rather than the store. The dropped
+	// counter is the one that matters: it is the only signal that a model was
+	// trained on an incomplete view of the traffic.
+	written := desc("trace_written_total", "Access records written to a trace segment.")
+	dropped := desc("trace_dropped_total", "Access records discarded because a trace ring was full.")
+
 	obs.Registry.MustRegister(collectorFunc(func(ch chan<- prometheus.Metric) {
 		st := c.Snapshot()
 		for _, s := range specs {
 			ch <- prometheus.MustNewConstMetric(s.d, prometheus.GaugeValue, s.val(st))
+		}
+		if rec != nil {
+			w, d := rec.Stats()
+			ch <- prometheus.MustNewConstMetric(written, prometheus.CounterValue, float64(w))
+			ch <- prometheus.MustNewConstMetric(dropped, prometheus.CounterValue, float64(d))
 		}
 	}))
 }
