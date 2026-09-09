@@ -1,0 +1,200 @@
+{
+  "uid": "belady-overview",
+  "title": "Belady overview",
+  "tags": ["belady"],
+  "timezone": "browser",
+  "editable": false,
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Object hit ratio",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "min": 0, "max": 1 },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+          "legendFormat": "{{instance}}",
+          "expr": "rate(belady_cache_hits_total[1m]) / clamp_min(rate(belady_cache_hits_total[1m]) + rate(belady_cache_misses_total[1m]), 1e-9)"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+          "legendFormat": "cluster",
+          "expr": "sum(rate(belady_cache_hits_total[1m])) / clamp_min(sum(rate(belady_cache_hits_total[1m])) + sum(rate(belady_cache_misses_total[1m])), 1e-9)"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Byte hit ratio",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "min": 0, "max": 1 },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+          "legendFormat": "cluster",
+          "expr": "sum(rate(belady_cache_hit_bytes_total[1m])) / clamp_min(sum(rate(belady_cache_hit_bytes_total[1m])) + sum(rate(belady_cache_miss_bytes_total[1m])), 1e-9)"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Request latency",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+          "legendFormat": "p50",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(belady_rpc_duration_seconds_bucket{job=\"gateway\"}[1m])))"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+          "legendFormat": "p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(belady_rpc_duration_seconds_bucket{job=\"gateway\"}[1m])))"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+          "legendFormat": "p99.9",
+          "expr": "histogram_quantile(0.999, sum by (le) (rate(belady_rpc_duration_seconds_bucket{job=\"gateway\"}[1m])))"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Eviction cost",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ns" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+          "legendFormat": "{{instance}} mean ns/victim",
+          "expr": "belady_cache_evict_ns_mean"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Evictions and rejections",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+          "legendFormat": "{{instance}} evictions",
+          "expr": "rate(belady_cache_evictions_total[1m])"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+          "legendFormat": "{{instance}} rejections",
+          "expr": "rate(belady_cache_rejections_total[1m])"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Capacity used",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "min": 0, "max": 1 },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+          "legendFormat": "{{instance}}",
+          "expr": "belady_cache_bytes_used / clamp_min(belady_cache_bytes_capacity, 1)"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Trace sampling",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+          "legendFormat": "{{instance}} written",
+          "expr": "rate(belady_cache_trace_written_total[1m])"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+          "legendFormat": "{{instance}} dropped",
+          "expr": "rate(belady_cache_trace_dropped_total[1m])"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Model rollout",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+          "legendFormat": "loads",
+          "expr": "sum(belady_model_loads_total)"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+          "legendFormat": "load failures",
+          "expr": "sum(belady_model_load_failures_total)"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+          "legendFormat": "rpc panics",
+          "expr": "sum(belady_rpc_panics_total)"
+        },
+        {
+          "refId": "D",
+          "datasource": { "type": "prometheus", "uid": "belady-prometheus" },
+          "legendFormat": "gateway inflight",
+          "expr": "sum(belady_gateway_inflight)"
+        }
+      ]
+    }
+  ]
+}

@@ -5,3 +5,8 @@
 !internal/
 !gen/
 !trainer/
+trainer/.venv/
+trainer/.pytest_cache/
+trainer/.ruff_cache/
+trainer/**/__pycache__/
+trainer/tests/

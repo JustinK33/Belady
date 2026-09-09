@@ -1,0 +1,46 @@
+name: belady
+
+x-dev-traces: &dev-traces
+  - ../traces:/var/lib/belady/traces
+
+services:
+  origin:
+    read_only: false
+    ports:
+      - "8181:8081"
+
+  registry:
+    read_only: false
+    volumes:
+      - ../models:/var/lib/belady/models
+
+  cachenode-0:
+    read_only: false
+    environment:
+      TRACE_SEGMENT_BYTES: ${TRACE_SEGMENT_BYTES:-512KiB}
+    ports:
+      - "8281:8081"
+    volumes: *dev-traces
+
+  cachenode-1:
+    read_only: false
+    environment:
+      TRACE_SEGMENT_BYTES: ${TRACE_SEGMENT_BYTES:-512KiB}
+    ports:
+      - "8282:8081"
+    volumes: *dev-traces
+
+  cachenode-2:
+    read_only: false
+    environment:
+      TRACE_SEGMENT_BYTES: ${TRACE_SEGMENT_BYTES:-512KiB}
+    ports:
+      - "8283:8081"
+    volumes: *dev-traces
+
+  trainer:
+    environment:
+      MODEL_OUT: /var/lib/belady/out/model.txt
+    volumes:
+      - ../traces:/var/lib/belady/traces:ro
+      - ../models:/var/lib/belady/out

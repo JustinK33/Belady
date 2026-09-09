@@ -1,0 +1,26 @@
+global:
+  scrape_interval: 5s
+  scrape_timeout: 4s
+  external_labels:
+    cluster: belady-local
+
+scrape_configs:
+  - job_name: gateway
+    static_configs:
+      - targets: [gateway:9090]
+
+  - job_name: cachenode
+    static_configs:
+      - targets: [cachenode-0:9090, cachenode-1:9090, cachenode-2:9090]
+
+  - job_name: registry
+    static_configs:
+      - targets: [registry:9090]
+
+  - job_name: origin
+    static_configs:
+      - targets: [origin:9090]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]

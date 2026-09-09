@@ -1,8 +1,15 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 GO ?= go
-COMPOSE ?= docker compose -f deploy/compose.yaml
 BIN := bin
+
+# Compose's project directory is deploy/, so every relative path inside the compose
+# files resolves from there. .env lives at the repo root instead, which is where you
+# would look for it, so point Compose at it explicitly when it exists.
+ENV_FILE := $(wildcard .env)
+COMPOSE_FLAGS := $(if $(ENV_FILE),--env-file $(ENV_FILE),)
+COMPOSE ?= docker compose -f deploy/compose.yaml $(COMPOSE_FLAGS)
+COMPOSE_DEV ?= docker compose -f deploy/compose.yaml -f deploy/compose.dev.yaml $(COMPOSE_FLAGS)
 SERVICES := gateway cachenode registry origin loadgen
 
 .PHONY: help
@@ -54,16 +61,33 @@ proto-check: proto ## Fail if generated stubs are stale
 .PHONY: up
 up: ## Bring up the cluster
 	$(COMPOSE) up -d --build
-	@echo "gateway  localhost:8080 (grpc)"
-	@echo "grafana  http://localhost:3000"
+	@$(MAKE) --no-print-directory wait
+	@echo "gateway     localhost:8080 (grpc)"
+	@echo "registry    localhost:8082 (grpc)"
+	@echo "prometheus  http://localhost:9091"
+	@echo "grafana     http://localhost:3000"
+
+.PHONY: up-dev
+up-dev: ## Bring up the cluster with host-visible traces, models and node ports
+	@mkdir -p traces models
+	$(COMPOSE_DEV) up -d --build
+	@$(MAKE) --no-print-directory wait
+
+.PHONY: wait
+wait: ## Block until every service reports healthy
+	@./scripts/wait-for-health.sh
 
 .PHONY: down
 down: ## Tear down the cluster and its volumes
-	$(COMPOSE) down -v
+	$(COMPOSE_DEV) down -v --remove-orphans
 
 .PHONY: logs
 logs: ## Follow cluster logs
 	$(COMPOSE) logs -f
+
+.PHONY: images
+images: ## Build the container images without starting anything
+	$(COMPOSE) --profile train build
 
 .PHONY: bench
 bench: ## Replay a workload against the running cluster and report hit ratio
@@ -72,6 +96,10 @@ bench: ## Replay a workload against the running cluster and report hit ratio
 .PHONY: train
 train: ## Train a model from a captured trace and publish it
 	$(MAKE) -C trainer train
+
+.PHONY: train-compose
+train-compose: ## Train inside the cluster, reading the traces volume
+	$(COMPOSE) --profile train run --rm --build trainer train
 
 .PHONY: clean
 clean:

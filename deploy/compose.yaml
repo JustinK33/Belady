@@ -1,0 +1,217 @@
+name: belady
+
+x-go-build: &go-build
+  context: ..
+  dockerfile: deploy/docker/Dockerfile.go
+
+x-hardening: &hardening
+  init: true
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:size=16m,mode=1777
+  restart: unless-stopped
+  stop_grace_period: 15s
+
+x-cachenode: &cachenode
+  <<: *hardening
+  build:
+    <<: *go-build
+    args:
+      SERVICE: cachenode
+  image: belady/cachenode:dev
+  depends_on:
+    - origin
+    - registry
+  volumes:
+    - traces:/var/lib/belady/traces
+  networks: [belady]
+
+x-cachenode-env: &cachenode-env
+  GRPC_ADDR: ":8081"
+  DEBUG_ADDR: ":9090"
+  ORIGIN_ADDR: origin:8081
+  REGISTRY_ADDR: registry:8082
+  CACHE_POLICY: ${CACHE_POLICY:-lrb}
+  CACHE_SHARDS: ${CACHE_SHARDS:-32}
+  CACHE_CAPACITY: ${CACHE_CAPACITY:-64MiB}
+  CACHE_SAMPLE_SIZE: ${CACHE_SAMPLE_SIZE:-8}
+  MODEL_BOUNDARY: ${MODEL_BOUNDARY:-10m}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  LOG_FORMAT: ${LOG_FORMAT:-json}
+  TRACE_ENABLED: ${TRACE_ENABLED:-true}
+  TRACE_DIR: /var/lib/belady/traces
+  TRACE_SAMPLE_DENOMINATOR: ${TRACE_SAMPLE_DENOMINATOR:-16}
+  TRACE_RING_CAPACITY: ${TRACE_RING_CAPACITY:-8192}
+  TRACE_SEGMENT_BYTES: ${TRACE_SEGMENT_BYTES:-8MiB}
+  TRACE_FLUSH_INTERVAL: ${TRACE_FLUSH_INTERVAL:-1s}
+  TRACE_BATCH_SIZE: ${TRACE_BATCH_SIZE:-4096}
+
+services:
+  origin:
+    <<: *hardening
+    build:
+      <<: *go-build
+      args:
+        SERVICE: origin
+    image: belady/origin:dev
+    environment:
+      GRPC_ADDR: ":8081"
+      DEBUG_ADDR: ":9090"
+      ORIGIN_LATENCY: ${ORIGIN_LATENCY:-2ms}
+      ORIGIN_JITTER: ${ORIGIN_JITTER:-1ms}
+      ORIGIN_MIN_SIZE: ${ORIGIN_MIN_SIZE:-512}
+      ORIGIN_MAX_SIZE: ${ORIGIN_MAX_SIZE:-65536}
+      ORIGIN_SIZE_ALPHA: ${ORIGIN_SIZE_ALPHA:-1.5}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    ports:
+      - "${ORIGIN_DEBUG_PORT:-9101}:9090"
+    networks: [belady]
+
+  registry:
+    <<: *hardening
+    build:
+      <<: *go-build
+      args:
+        SERVICE: registry
+    image: belady/registry:dev
+    environment:
+      GRPC_ADDR: ":8082"
+      DEBUG_ADDR: ":9090"
+      MODEL_DIR: /var/lib/belady/models
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    volumes:
+      - models:/var/lib/belady/models
+    ports:
+      - "${REGISTRY_PORT:-8082}:8082"
+      - "${REGISTRY_DEBUG_PORT:-9102}:9090"
+    networks: [belady]
+
+  cachenode-0:
+    <<: *cachenode
+    environment:
+      <<: *cachenode-env
+      NODE_ID: cachenode-0
+    ports:
+      - "${CACHENODE_0_DEBUG_PORT:-9201}:9090"
+
+  cachenode-1:
+    <<: *cachenode
+    environment:
+      <<: *cachenode-env
+      NODE_ID: cachenode-1
+    ports:
+      - "${CACHENODE_1_DEBUG_PORT:-9202}:9090"
+
+  cachenode-2:
+    <<: *cachenode
+    environment:
+      <<: *cachenode-env
+      NODE_ID: cachenode-2
+    ports:
+      - "${CACHENODE_2_DEBUG_PORT:-9203}:9090"
+
+  gateway:
+    <<: *hardening
+    build:
+      <<: *go-build
+      args:
+        SERVICE: gateway
+    image: belady/gateway:dev
+    depends_on:
+      - cachenode-0
+      - cachenode-1
+      - cachenode-2
+    environment:
+      GRPC_ADDR: ":8080"
+      DEBUG_ADDR: ":9090"
+      CACHE_NODES: cachenode-0:8081,cachenode-1:8081,cachenode-2:8081
+      RING_REPLICAS: ${RING_REPLICAS:-256}
+      RING_LOAD_FACTOR: ${RING_LOAD_FACTOR:-1.25}
+      MAX_INFLIGHT: ${MAX_INFLIGHT:-4096}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+      - "${GATEWAY_DEBUG_PORT:-9090}:9090"
+    networks: [belady]
+
+  trainer:
+    profiles: [train]
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile.trainer
+    image: belady/trainer:dev
+    command:
+      - train
+    environment:
+      TRACE_DIR: /var/lib/belady/traces
+      MODEL_OUT: /tmp/model.txt
+      MODEL_BOUNDARY: ${MODEL_BOUNDARY:-10m}
+      REGISTRY_ADDR: registry:8082
+    volumes:
+      - traces:/var/lib/belady/traces:ro
+    networks: [belady]
+
+  prometheus:
+    image: prom/prometheus:v3.6.0@sha256:76947e7ef22f8a698fc638f706685909be425dbe09bd7a2cd7aca849f79b5f64
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=6h
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9091}:9090"
+    networks: [belady]
+
+  grafana:
+    image: grafana/grafana:12.2.0@sha256:74144189b38447facf737dfd0f3906e42e0776212bf575dc3334c3609183adf7
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_INSTALL_PLUGINS: ""
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    networks: [belady]
+
+networks:
+  belady:
+    driver: bridge
+
+volumes:
+  traces:
+  models:
+  prometheus:
+  grafana:
