@@ -28,6 +28,12 @@ linters:
           disabled: true
 
   exclusions:
+    generated: lax
+    # Belt and braces with `generated: lax`. Detecting the header means reading the
+    # file, and when that fails protoc's output arrives as a wall of fieldalignment
+    # findings against code nobody is allowed to edit by hand.
+    paths:
+      - gen
     rules:
       # Benchmarks and tests intentionally ignore returns and pack structs loosely.
       - path: _test\.go
@@ -39,3 +45,6 @@ formatters:
   enable:
     - gofmt
     - goimports
+  exclusions:
+    paths:
+      - gen
