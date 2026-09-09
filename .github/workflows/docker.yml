@@ -75,6 +75,11 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,format=long
+          # Pinned rather than inherited from the repository description. buildx parses
+          # the label list as CSV, so a double quote anywhere in it fails every build
+          # with "Quote Not Closed" and nothing in the repo explains why.
+          labels: |
+            org.opencontainers.image.description=A distributed gRPC cache whose eviction policy is a machine-learned approximation of Belady's optimal algorithm.
 
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:

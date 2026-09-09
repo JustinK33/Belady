@@ -41,6 +41,9 @@ make -C trainer test
 
 CI runs all of these plus `govulncheck`, `gosec`, `pip-audit`, CodeQL, and a Compose integration run with a hit-ratio floor and a p99 ceiling.
 
+If you touch a workflow, run `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12` with `shellcheck` installed (`brew install shellcheck`).
+Without it actionlint silently skips every `run:` block, which is where the mistakes are, and the check passes locally and fails in CI.
+
 ## Two contracts that will not fail loudly on their own
 
 **The feature layout is shared between Go and Python.**

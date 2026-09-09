@@ -1,6 +1,6 @@
 module github.com/JustinK33/newproj
 
-go 1.26.3
+go 1.26.8
 
 require (
 	github.com/prometheus/client_golang v1.24.1
