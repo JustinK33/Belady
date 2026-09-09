@@ -18,9 +18,12 @@ RUN test -n "${SERVICE}" && test -d "./cmd/${SERVICE}"
 RUN CGO_ENABLED=0 GOOS=linux GOFLAGS=-buildvcs=false \
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/service ./cmd/${SERVICE}
 
+RUN mkdir -p /state/traces /state/models
+
 FROM ${RUNTIME_IMAGE}
 
 COPY --from=build /out/service /usr/local/bin/service
+COPY --from=build --chown=65532:65532 /state/ /var/lib/belady/
 
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/service"]

@@ -309,6 +309,22 @@ func TestRecorderRotatesOnAge(t *testing.T) {
 	}
 }
 
+// TestNewRefusesAnUnwritableDirectory is the container case: a fresh Docker volume is
+// owned by root, so a node running as uid 65532 could otherwise start, serve, and log
+// a write failure every flush interval for the rest of its life.
+func TestNewRefusesAnUnwritableDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the permission bits this test relies on")
+	}
+	dir := filepath.Join(t.TempDir(), "traces")
+	if err := os.Mkdir(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(Config{Dir: dir, Shards: 1}, discard()); err == nil {
+		t.Error("a recorder was built for a directory it cannot write to")
+	}
+}
+
 func TestReadDirRejectsAnEmptyDirectory(t *testing.T) {
 	if _, err := ReadDir(t.TempDir()); err == nil {
 		t.Error("reading a directory with no segments succeeded")

@@ -101,6 +101,13 @@ func New(cfg Config, log *slog.Logger) (*Recorder, error) {
 	if err := os.MkdirAll(cfg.Dir, 0o750); err != nil {
 		return nil, fmt.Errorf("trace: %w", err)
 	}
+	// Probe now rather than discovering it one flush at a time. Tracing is opt-in, so a
+	// directory the process cannot write to is a misconfiguration, and the alternative
+	// is a node that serves happily while logging the same error every second forever.
+	// The usual cause is a fresh Docker volume, which is created owned by root.
+	if err := writable(cfg.Dir); err != nil {
+		return nil, err
+	}
 
 	r := &Recorder{
 		rings:   make([]*Ring, cfg.Shards),
@@ -112,6 +119,18 @@ func New(cfg Config, log *slog.Logger) (*Recorder, error) {
 		r.rings[i] = NewRing(cfg.RingCapacity, cfg.SampleDenominator)
 	}
 	return r, nil
+}
+
+func writable(dir string) error {
+	f, err := os.CreateTemp(dir, ".probe-*")
+	if err != nil {
+		return fmt.Errorf("trace: %s is not writable, so no trace would ever be recorded: %w", dir, err)
+	}
+	name := f.Name()
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("trace: %w", err)
+	}
+	return os.Remove(name)
 }
 
 // Shards reports how many rings exist. The caller has to match this exactly:
@@ -240,7 +259,9 @@ func (r *Recorder) ensureSegment() error {
 	}
 	name := fmt.Sprintf("%s-%d", r.cfg.NodeID, time.Now().UnixNano())
 	r.path = filepath.Join(r.cfg.Dir, name)
-	f, err := os.OpenFile(r.path+tmpExtension, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o640)
+	// 0o600: the trainer reads these as the same uid the cache nodes write them as, so
+	// there is nothing for the group bit to buy.
+	f, err := os.OpenFile(r.path+tmpExtension, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
