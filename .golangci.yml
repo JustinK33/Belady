@@ -1,0 +1,41 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - errorlint
+    - misspell
+    - nilerr
+    - revive
+    - unconvert
+    - usestdlibvars
+
+  settings:
+    govet:
+      enable:
+        - fieldalignment # hot-path structs pay for padding
+
+    revive:
+      rules:
+        # A comment on `func Int(key string, def int) int` adds nothing. Comments
+        # here are reserved for behaviour that is not obvious from the signature.
+        - name: exported
+          disabled: true
+
+  exclusions:
+    rules:
+      # Benchmarks and tests intentionally ignore returns and pack structs loosely.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - govet
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
