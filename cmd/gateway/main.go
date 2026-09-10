@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
@@ -152,6 +153,7 @@ func (s *server) Stats(ctx context.Context, req *beladyv1.StatsRequest) (*belady
 		out.Admissions += st.GetAdmissions()
 		out.Rejections += st.GetRejections()
 		out.Evictions += st.GetEvictions()
+		out.Expirations += st.GetExpirations()
 		out.Objects += st.GetObjects()
 		out.BytesUsed += st.GetBytesUsed()
 		out.BytesCapacity += st.GetBytesCapacity()
@@ -209,6 +211,21 @@ func main() {
 	go func() {
 		if err := obs.Serve(ctx, config.String("DEBUG_ADDR", ":9090")); err != nil {
 			log.Error("debug endpoint failed", "err", err)
+		}
+	}()
+
+	// The REST surface is off unless HTTP_ADDR is set, and a bad HTTP config is fatal
+	// rather than logged: starting without the API someone asked for is worse than
+	// not starting.
+	httpAddr := config.String("HTTP_ADDR", "")
+	httpTimeout := config.Duration("HTTP_TIMEOUT", 5*time.Second)
+	if httpAddr != "" && config.String("HTTP_AUTH_TOKEN", "") == "" {
+		log.Error("bad configuration", "err", errNoToken)
+		os.Exit(2)
+	}
+	go func() {
+		if err := serveHTTP(ctx, httpAddr, config.String("HTTP_AUTH_TOKEN", ""), httpTimeout, srv, log); err != nil {
+			log.Error("http api failed", "err", err)
 		}
 	}()
 
