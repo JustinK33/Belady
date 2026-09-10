@@ -29,7 +29,11 @@ import (
 type server struct {
 	beladyv1.UnimplementedCacheServer
 
-	cache  *cache.Cache
+	cache *cache.Cache
+
+	// origin is nil when ORIGIN_ADDR is unset. That is cache-aside mode: a miss is
+	// reported as not found and the client decides what to do, which is how a cache
+	// with nothing behind it has to behave.
 	origin beladyv1.OriginClient
 
 	// models is nil unless the learned policy is configured. Stats reads the live
@@ -55,6 +59,9 @@ func (s *server) Get(ctx context.Context, req *beladyv1.GetRequest) (*beladyv1.G
 
 	if v, ok := s.cache.Get(key); ok {
 		return &beladyv1.GetResponse{Value: v, Found: true, Source: beladyv1.Source_SOURCE_CACHE, ServedBy: s.nodeID}, nil
+	}
+	if s.origin == nil {
+		return &beladyv1.GetResponse{Found: false, ServedBy: s.nodeID}, nil
 	}
 
 	// Do returns the shared result; only one goroutine per key reaches origin.
@@ -85,7 +92,7 @@ func (s *server) Put(_ context.Context, req *beladyv1.PutRequest) (*beladyv1.Put
 		return nil, status.Error(codes.InvalidArgument, "key must not be empty")
 	}
 	return &beladyv1.PutResponse{
-		Admitted: s.cache.Put(req.GetKey(), req.GetValue()),
+		Admitted: s.cache.Put(req.GetKey(), req.GetValue(), time.Duration(req.GetTtlSeconds())*time.Second),
 		ServedBy: s.nodeID,
 	}, nil
 }
@@ -117,6 +124,7 @@ func (s *server) Stats(context.Context, *beladyv1.StatsRequest) (*beladyv1.Stats
 		Admissions:    st.Admissions,
 		Rejections:    st.Rejections,
 		Evictions:     st.Evictions,
+		Expirations:   st.Expirations,
 		Objects:       st.Objects,
 		BytesUsed:     st.BytesUsed,
 		BytesCapacity: st.BytesCapacity,
@@ -175,7 +183,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	policyName := config.String("CACHE_POLICY", "lru")
+	// s3fifo rather than lru as the default because it is strictly better on hit
+	// ratio and costs no more, and rather than lrb because lrb without a trained
+	// model is just sampled eviction under a misleading name.
+	policyName := config.String("CACHE_POLICY", "s3fifo")
 	mkPolicy, models, err := newPolicy(policyName)
 	if err != nil {
 		log.Error("bad configuration", "err", err)
@@ -200,11 +211,13 @@ func main() {
 			"capacity", capacity, "gomemlimit", limit)
 	}
 
+	defaultTTL := config.Duration("CACHE_DEFAULT_TTL", 0)
 	c, err := cache.New(cache.Config{
 		NewPolicy:     mkPolicy,
 		CapacityBytes: capacity,
 		Shards:        shards,
 		SampleSize:    config.Int("CACHE_SAMPLE_SIZE", 8),
+		DefaultTTL:    defaultTTL,
 		Trace:         recorder,
 	})
 	if err != nil {
@@ -212,19 +225,24 @@ func main() {
 		os.Exit(2)
 	}
 
-	conn, err := grpcx.Dial(config.MustString("ORIGIN_ADDR"))
-	if err != nil {
-		log.Error("origin dial failed", "err", err)
-		os.Exit(2)
-	}
-	defer func() { _ = conn.Close() }()
-
 	srv := &server{
 		cache:  c,
-		origin: beladyv1.NewOriginClient(conn),
 		models: models,
 		trace:  recorder,
 		nodeID: nodeID,
+	}
+
+	// An unset ORIGIN_ADDR is a supported mode, not a mistake: it is what you want
+	// when the cache is the store rather than a tier in front of one.
+	originAddr := config.String("ORIGIN_ADDR", "")
+	if originAddr != "" {
+		conn, err := grpcx.Dial(originAddr)
+		if err != nil {
+			log.Error("origin dial failed", "addr", originAddr, "err", err)
+			os.Exit(2)
+		}
+		defer func() { _ = conn.Close() }()
+		srv.origin = beladyv1.NewOriginClient(conn)
 	}
 
 	// The learned policy is the only one that needs a model, so the registry
@@ -251,9 +269,14 @@ func main() {
 
 	registerCacheMetrics(c, recorder)
 	_, perShard := c.Shape()
+	mode := "read-through"
+	if srv.origin == nil {
+		mode = "cache-aside"
+	}
 	log.Info("cache node configured", "node_id", nodeID, "policy", policyName,
-		"capacity", capacity, "shards", shards, "per_shard_bytes", perShard,
-		"trace", recorder != nil, "model_boundary", boundary.String())
+		"mode", mode, "capacity", capacity, "shards", shards, "per_shard_bytes", perShard,
+		"default_ttl", defaultTTL.String(), "trace", recorder != nil,
+		"model_boundary", boundary.String())
 
 	if recorder != nil {
 		// Run owns the segment files, so it has to finish its final flush before the
@@ -297,6 +320,7 @@ func registerCacheMetrics(c *cache.Cache, rec *trace.Recorder) {
 		{desc("hit_bytes_total", "Bytes served from cache."), func(s cache.Stats) float64 { return float64(s.HitBytes) }},
 		{desc("miss_bytes_total", "Bytes fetched from origin."), func(s cache.Stats) float64 { return float64(s.MissBytes) }},
 		{desc("evictions_total", "Objects evicted."), func(s cache.Stats) float64 { return float64(s.Evictions) }},
+		{desc("expirations_total", "Objects dropped because their TTL passed."), func(s cache.Stats) float64 { return float64(s.Expirations) }},
 		{desc("rejections_total", "Objects refused admission."), func(s cache.Stats) float64 { return float64(s.Rejections) }},
 		{desc("objects", "Objects currently cached."), func(s cache.Stats) float64 { return float64(s.Objects) }},
 		{desc("bytes_used", "Bytes currently cached."), func(s cache.Stats) float64 { return float64(s.BytesUsed) }},
