@@ -14,59 +14,64 @@ The technique is [Learned Relaxed Belady](https://www.usenix.org/conference/nsdi
 Because the model runs inside the eviction path, it has a hard sub-microsecond budget.
 That constraint is the point: it forces flattened cache-friendly tree layouts, sharded locking, zero-allocation request handling, and lock-free trace sampling.
 
-## Status
+## What it does
 
-The full loop works: the cluster serves traffic, samples access traces, trains a model from them, publishes it, and the cache nodes install it without a restart.
+The full loop works.
+The cluster serves traffic, samples access traces, trains a model from them, publishes it, and the cache nodes install it without a restart.
 It runs under Docker Compose with Prometheus and Grafana, and CI covers build, race tests, lint, generated-code drift, vulnerability scanning, and a Compose integration run gated on hit ratio and p99.
-The reasoning behind it is written up in [docs/](docs/), including nine decision records; the plan and the open questions are in [ROADMAP.md](ROADMAP.md).
+
+There are two serving modes, and a node logs which one it is at startup.
+With `ORIGIN_ADDR` set a node is read-through: a miss fetches from origin behind single-flight, admits the result, and returns it.
+Without it the node is cache-aside, and a miss is simply not found, leaving the client to decide what to do.
 
 It is not a Redis replacement and does not try to be: no data types beyond bytes, no persistence, no replication, no pub/sub.
-What it is is a cache tier, and the small stack below makes it a usable one.
+What it is is a cache tier, and the small stack around it makes that usable.
+The reasoning is written up in [docs/](docs/), including nine decision records, and the open questions are in [ROADMAP.md](ROADMAP.md).
 
-## Quick start
+## Tech stack
 
-Two ways in, depending on whether you want to use the cache or measure it.
+| Layer | What it uses |
+| --- | --- |
+| Services | Go 1.26, four binaries under `cmd/` |
+| Internal APIs | gRPC and protobuf, contracts in `api/belady/v1/`, stubs committed under `gen/` |
+| Trainer | Python 3.11+, LightGBM, numpy |
+| Metrics | `prometheus/client_golang`, scraped by Prometheus, dashboards in Grafana |
+| Concurrency | `golang.org/x/sync` for single-flight, plus per-shard locks and atomics |
+| Deploy | Docker Compose, three stack files under `deploy/` |
+| Checks | `go test -race`, golangci-lint with gosec, ruff, pytest, CodeQL, pip-audit |
 
-### Use it
+Four direct Go requires, four Python ones.
+`grpcio-tools` and `ruff` are pinned exactly rather than floated, because both produce artefacts CI compares byte for byte and a minor bump would fail the build for no real reason.
 
-Two containers, an HTTP API, no origin and no training pipeline.
+## Architecture
 
-```sh
-export HTTP_AUTH_TOKEN=$(openssl rand -hex 32)
-make up-min
+| Service | Language | Role |
+| --- | --- | --- |
+| `gateway` | Go | Client-facing gRPC API, consistent-hash routing, miss coalescing |
+| `cachenode` | Go | Sharded store, learned eviction, trace sampling, hot model reload |
+| `registry` | Go | Versioned model blobs, streamed to cache nodes |
+| `trainer` | Python | Offline labeling and LightGBM training |
+| `origin` | Go | Test-fixture backing store |
+
+```mermaid
+flowchart TD
+    client["Client"] -->|"gRPC :8080, or HTTP :8090 with a bearer token"| gw["gateway<br/>consistent hashing with bounded loads"]
+    gw -->|"Get / Put / Delete on :8081"| node["cachenode x3<br/>32 shards each, sampled eviction"]
+    node -->|"miss, single-flight, read-through mode only"| origin["origin<br/>tunable latency and object size"]
+    node -->|"one lock-free ring per shard, rotated on size and age"| trace[("TRACE_DIR<br/>segment files")]
+    trace -->|"label each inter-access interval against the boundary"| trainer["trainer<br/>Python, LightGBM"]
+    trainer -->|"PublishModel"| registry["registry<br/>versioned blobs in MODEL_DIR"]
+    registry -->|"watch stream, install without a restart"| node
+    gw --> prom["Prometheus and Grafana"]
+    node --> prom
 ```
 
-```sh
-curl -H "Authorization: Bearer $HTTP_AUTH_TOKEN" \
-     -X PUT --data-binary 'hello' 'localhost:8090/v1/keys/greeting?ttl=5m'
-curl -H "Authorization: Bearer $HTTP_AUTH_TOKEN" localhost:8090/v1/keys/greeting
-curl -H "Authorization: Bearer $HTTP_AUTH_TOKEN" localhost:8090/v1/stats
-```
+That cycle is the whole project.
+A `Get` hashes to a node through the ring, the node answers from its shard or fetches from origin behind single-flight, and the access is appended to its shard's lock-free ring, which never slows a request: if the ring is full the record is dropped and counted in `belady_cache_trace_dropped_total`.
+The trainer reads the rotated segment files offline, labels each sampled interval against the Belady boundary, fits a LightGBM model, and pushes it to the registry, where a watch stream carries it back to every node and the new model takes over eviction mid-flight.
+Nothing in that loop is on the request path except the eviction scoring itself, which is why the registry being down means nodes keep evicting with the model they already have rather than failing.
 
-`GET`, `PUT` and `DELETE` on `/v1/keys/{key}`, plus `GET /v1/stats`.
-Keys may contain slashes, `?ttl=` takes a Go duration, and the bearer token is mandatory: the gateway refuses to start with `HTTP_ADDR` set and no token.
-The default policy is S3-FIFO, which needs no model and no trainer.
-
-### Measure it
-
-The full stack: five services, three cache nodes, Prometheus, Grafana, and the learned policy.
-
-```sh
-cp .env.example .env
-make up      # the cluster, Prometheus and Grafana, then wait for health
-make bench   # replay a Zipfian workload, report hit ratio and tail latency
-make train   # train a model from a captured trace and publish it
-make bench   # again, to see what the model changed
-make test    # unit tests with the race detector
-```
-
-`make help` lists the rest.
-
-### The two modes
-
-A cache node with `ORIGIN_ADDR` set is **read-through**: a miss fetches from origin behind single-flight, admits the result, and returns it.
-Without it the node is **cache-aside**: a miss is simply not found, and the client decides what to do.
-The minimal stack is cache-aside, the full stack is read-through, and the node logs which one it is at startup.
+Topology, the request path, where state lives, and the failure table are in [docs/01-architecture.md](docs/01-architecture.md).
 
 ## Measured results
 
@@ -87,18 +92,6 @@ A learned policy pays off in proportion to how expensive a miss is, so this work
 Read the hit-ratio number as the interesting result and the latency number as the price.
 
 Numbers are reproducible with `make bench`; see [docs/03-performance.md](docs/03-performance.md) for the full method.
-
-## Architecture at a glance
-
-| Service | Language | Role |
-| --- | --- | --- |
-| `gateway` | Go | Client-facing gRPC API, consistent-hash routing, miss coalescing |
-| `cachenode` | Go | Sharded store, learned eviction, trace sampling, hot model reload |
-| `registry` | Go | Versioned model blobs, streamed to cache nodes |
-| `trainer` | Python | Offline labeling and LightGBM training |
-| `origin` | Go | Test-fixture backing store |
-
-Topology and request-path diagrams: [docs/01-architecture.md](docs/01-architecture.md).
 
 ## What building this taught me
 
@@ -153,3 +146,42 @@ That is now a refusal to start rather than a comment.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Quick start
+
+Two ways in, depending on whether you want to use the cache or measure it.
+
+### Use it
+
+Two containers, an HTTP API, no origin and no training pipeline.
+
+```sh
+export HTTP_AUTH_TOKEN=$(openssl rand -hex 32)
+make up-min
+```
+
+```sh
+curl -H "Authorization: Bearer $HTTP_AUTH_TOKEN" \
+     -X PUT --data-binary 'hello' 'localhost:8090/v1/keys/greeting?ttl=5m'
+curl -H "Authorization: Bearer $HTTP_AUTH_TOKEN" localhost:8090/v1/keys/greeting
+curl -H "Authorization: Bearer $HTTP_AUTH_TOKEN" localhost:8090/v1/stats
+```
+
+`GET`, `PUT` and `DELETE` on `/v1/keys/{key}`, plus `GET /v1/stats`.
+Keys may contain slashes, `?ttl=` takes a Go duration, and the bearer token is mandatory: the gateway refuses to start with `HTTP_ADDR` set and no token.
+The default policy is S3-FIFO, which needs no model and no trainer.
+
+### Measure it
+
+The full stack: five services, three cache nodes, Prometheus, Grafana, and the learned policy.
+
+```sh
+cp .env.example .env
+make up      # the cluster, Prometheus and Grafana, then wait for health
+make bench   # replay a Zipfian workload, report hit ratio and tail latency
+make train   # train a model from a captured trace and publish it
+make bench   # again, to see what the model changed
+make test    # unit tests with the race detector
+```
+
+`make help` lists the rest.
