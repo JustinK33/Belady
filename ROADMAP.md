@@ -28,10 +28,16 @@ The learned policy beats sampled LRU on hit ratio by 0.62 points and costs rough
 | 14 | GitHub Actions, Dependabot, security and contributor docs | done |
 | 15 | `docs/` prose, eight ADRs, the architecture diagram | next |
 | 16 | Final measured pass, numbers into the docs | next |
+| 17 | Usable mode: REST surface, per-entry TTL, optional origin, two-container stack | done |
 
 Steps 13 and 14 were written without a running Docker daemon and without a push to GitHub, so they sat at "done, unverified" until the first real Actions run.
 That run found four bugs no local check had, which is the argument for pushing early rather than reading YAML harder: `sha256sum *` unquoted in the release job, a repository description containing a double quote that buildx parses as CSV and rejects on every image build, seven reachable stdlib advisories on the `go` directive, and a fresh Docker named volume being root-owned so every node logged a write failure once a second while serving happily.
 All four workflows are green on `main` now, and the integration run is the first proof the whole loop works in containers rather than on a laptop: 133,631 training rows sampled from a live cluster, holdout AUC 0.9749, the model installed by all three cache nodes with zero load failures, and a second replay served under it at 0.8919 object hit against a Belady MIN of 0.9381.
+
+Step 17 is out of numerical order because it was not in the plan.
+It came from asking what it would take to actually use this rather than only measure it, and the answer turned out to be small: `ORIGIN_ADDR` was the only setting with no usable default, so an unset one now means cache-aside instead of a misconfiguration; entries can carry a TTL; the gateway serves a REST surface behind a mandatory bearer token; and `make up-min` brings the whole thing up as two containers.
+The default policy moved from LRB to S3-FIFO in the same pass, because LRB with no trained model is sampled eviction under a misleading name.
+None of it changes the measurement path: `loadgen` never sets a TTL and `CACHE_DEFAULT_TTL` is zero, so entries still leave only by eviction, which is what makes "gap to Belady MIN" a statement about the policy.
 
 ## Next
 
@@ -41,10 +47,10 @@ The code carries only the comments that explain something non-obvious; the prose
 
 - `docs/README.md` as an index.
 - `docs/01-architecture.md`: the five services, the request path, where state lives, why the boundaries fall where they do.
-- `docs/02-learned-eviction.md`: Belady's MIN, the Relaxed Belady boundary, the feature vector, how labels are derived, and why snapshot offset matters more than the booster.
+- `docs/02-learned-eviction.md`: Belady's MIN, the Relaxed Belady boundary, the feature vector, how labels are derived, why snapshot offset matters more than the booster, and why an opt-in TTL does not invalidate the MIN baseline as long as the measured runs do not set one.
 - `docs/03-performance.md`: the budgets, the allocation strategy, the microbenchmarks, and the measured cluster numbers with the method spelled out.
-- `docs/04-api.md`: the gRPC contract, deadlines, message size caps, error semantics.
-- `docs/05-operations.md`: running it, tuning capacity and shards, choosing the boundary, reading the metrics, when a trace segment becomes trainable, and why the images carry an empty `/var/lib/belady` owned by uid 65532 - Docker seeds a new named volume from the image, which is the only way a distroless non-root container can write to one, and a Linux bind mount via `make up-dev` still needs a `user:` override or a chown.
+- `docs/04-api.md`: the gRPC contract, deadlines, message size caps, error semantics, and the REST surface alongside it - the route table, TTL semantics and why sub-second TTLs are rejected rather than truncated, and how gRPC codes map onto HTTP statuses.
+- `docs/05-operations.md`: running it, the two modes and how to pick one, `HTTP_AUTH_TOKEN` and why a set `HTTP_ADDR` without one is a refusal to start, tuning capacity and shards, choosing the boundary, reading the metrics, when a trace segment becomes trainable, and why the images carry an empty `/var/lib/belady` owned by uid 65532 - Docker seeds a new named volume from the image, which is the only way a distroless non-root container can write to one, and a Linux bind mount via `make up-dev` still needs a `user:` override or a chown.
 - `docs/06-security.md`: the threat model, what is hardened, and the two known gaps.
 - Eight ADRs: the Go and Python split, gRPC over HTTP, sampled eviction over a global priority queue, a hand-rolled Go evaluator over CGO or ONNX, in-memory slab over mmap, consistent hashing with bounded loads, Compose over Kubernetes, and committing generated protobuf code.
 - `docs/diagrams/architecture.excalidraw`: two scenes, black strokes only, on a strict grid with no overlapping arrows or labels.
@@ -76,6 +82,11 @@ Either the field becomes milliseconds or the operations doc explains why second 
 It trains a model from a trace captured seconds earlier, so if the smoke run is too short or too fast the labels come out one-sided and the trainer refuses to fit, which is the correct behaviour and a red build.
 The one passing run so far had a positive rate of 0.0759 against a `MIN_CLASS_RATE` floor of 0.01, which is comfortable but is a single sample.
 If it proves unstable, the fix is a longer smoke run, not a lower floor.
+
+**TTL expiry is lazy, so an expired entry holds its bytes until something touches it.**
+Expiry is resolved on read rather than by a background sweep, which keeps the write path free of a timer and the read path honest about never serving stale data.
+The cost is that a keyspace written with a TTL and then never read again occupies capacity until the policy evicts it, which on a mostly-idle cache could be a long time.
+The signal to add an active sweep is `bytes_used` staying high while the hit ratio falls, and the marker is in `internal/cache/entry.go`.
 
 **Dev-mode Compose bind mounts assume Docker Desktop's permission mapping.**
 `make up-dev` bind-mounts `traces/` and `models/` into containers running as uid 65532.
