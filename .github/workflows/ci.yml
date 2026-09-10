@@ -88,15 +88,16 @@ jobs:
       # because its version is recorded in the header of every generated file.
       - name: Install protoc ${{ env.PROTOC_VERSION }}
         run: |
-          curl -fsSL -o /tmp/protoc.zip \
+          # retry-all-errors because the release CDN returns an occasional 500, and a
+          # download flake should not be indistinguishable from stale generated code.
+          curl -fsSL --retry 3 --retry-all-errors -o /tmp/protoc.zip \
             "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
           unzip -q /tmp/protoc.zip -d /tmp/protoc
           sudo install -m 0755 /tmp/protoc/bin/protoc /usr/local/bin/protoc
           protoc --version
 
+      # Covers the Python stubs too, so the two sides of the contract cannot drift.
       - run: make proto-check
-
-      - run: make -C trainer proto-check
 
   python:
     name: trainer ${{ matrix.python }}
