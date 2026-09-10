@@ -14,6 +14,7 @@ ENV_FILE := $(wildcard .env)
 COMPOSE_FLAGS := $(if $(ENV_FILE),--env-file $(ENV_FILE),)
 COMPOSE ?= docker compose -f deploy/compose.yaml $(COMPOSE_FLAGS)
 COMPOSE_DEV ?= docker compose -f deploy/compose.yaml -f deploy/compose.dev.yaml $(COMPOSE_FLAGS)
+COMPOSE_MIN ?= docker compose -f deploy/compose.min.yaml $(COMPOSE_FLAGS)
 SERVICES := gateway cachenode registry origin loadgen
 
 # Pinned so a local run and CI report the same findings. A newer staticcheck finds
@@ -91,6 +92,23 @@ up-dev: ## Bring up the cluster with host-visible traces, models and node ports
 	@mkdir -p traces models
 	$(COMPOSE_DEV) up -d --build
 	@$(MAKE) --no-print-directory wait
+
+# The minimal stack is two containers with an HTTP API and no origin, registry,
+# trainer or observability: the cache on its own, for using rather than measuring.
+.PHONY: up-min
+up-min: ## Bring up a single cache node behind the gateway's HTTP API
+	@test -n "$$HTTP_AUTH_TOKEN" || { \
+	  echo "HTTP_AUTH_TOKEN is unset. Generate one with:"; \
+	  echo "  export HTTP_AUTH_TOKEN=\$$(openssl rand -hex 32)"; \
+	  exit 2; }
+	$(COMPOSE_MIN) up -d --build
+	@./scripts/wait-for-health.sh gateway
+	@echo "http  localhost:$${GATEWAY_HTTP_PORT:-8090}  (bearer token required)"
+	@echo "grpc  localhost:$${GATEWAY_PORT:-8080}"
+
+.PHONY: down-min
+down-min: ## Tear down the minimal stack
+	$(COMPOSE_MIN) down -v --remove-orphans
 
 .PHONY: wait
 wait: ## Block until every service reports healthy

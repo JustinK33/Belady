@@ -21,6 +21,22 @@ ports=(
   "grafana:${GRAFANA_PORT:-3000}:/api/health"
 )
 
+# Named arguments narrow the list, so the minimal stack can wait on the two
+# containers it actually runs instead of timing out on the six it does not.
+if (($#)); then
+  wanted=()
+  for want in "$@"; do
+    for entry in "${ports[@]}"; do
+      [ "${entry%%:*}" = "$want" ] && wanted+=("$entry")
+    done
+  done
+  if ((${#wanted[@]} != $#)); then
+    echo "unknown service in: $*" >&2
+    exit 2
+  fi
+  ports=("${wanted[@]}")
+fi
+
 deadline=$(( $(date +%s) + TIMEOUT ))
 pending=("${ports[@]}")
 

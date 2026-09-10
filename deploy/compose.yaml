@@ -38,6 +38,7 @@ x-cachenode-env: &cachenode-env
   CACHE_SHARDS: ${CACHE_SHARDS:-32}
   CACHE_CAPACITY: ${CACHE_CAPACITY:-64MiB}
   CACHE_SAMPLE_SIZE: ${CACHE_SAMPLE_SIZE:-8}
+  CACHE_DEFAULT_TTL: ${CACHE_DEFAULT_TTL:-0}
   MODEL_BOUNDARY: ${MODEL_BOUNDARY:-10m}
   LOG_LEVEL: ${LOG_LEVEL:-info}
   LOG_FORMAT: ${LOG_FORMAT:-json}
@@ -131,6 +132,9 @@ services:
       GRPC_ADDR: ":8080"
       DEBUG_ADDR: ":9090"
       CACHE_NODES: cachenode-0:8081,cachenode-1:8081,cachenode-2:8081
+      HTTP_ADDR: ${HTTP_ADDR:-}
+      HTTP_AUTH_TOKEN: ${HTTP_AUTH_TOKEN:-}
+      HTTP_TIMEOUT: ${HTTP_TIMEOUT:-5s}
       RING_REPLICAS: ${RING_REPLICAS:-256}
       RING_LOAD_FACTOR: ${RING_LOAD_FACTOR:-1.25}
       MAX_INFLIGHT: ${MAX_INFLIGHT:-4096}
@@ -138,6 +142,7 @@ services:
       LOG_FORMAT: ${LOG_FORMAT:-json}
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
+      - "${GATEWAY_HTTP_PORT:-8090}:8090"
       - "${GATEWAY_DEBUG_PORT:-9090}:9090"
     networks: [belady]
 
