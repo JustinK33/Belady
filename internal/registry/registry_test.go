@@ -14,6 +14,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/proto"
 
 	beladyv1 "github.com/JustinK33/Belady/gen/belady/v1"
 	"github.com/JustinK33/Belady/internal/features"
@@ -273,6 +274,38 @@ func TestPublishRejectsBadMetadata(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestGetModelRejectsTraversal covers the read path. Publishing validates the
+// version because it becomes a filename, but GetModel took it straight from the
+// request, so a version of "../secret" escaped MODEL_DIR entirely.
+func TestGetModelRejectsTraversal(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "models")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// A model the operator never published, one directory up from MODEL_DIR.
+	body := []byte("tree\nnot a model the registry owns\n")
+	planted := metaFor("secret", body)
+	raw, err := proto.Marshal(planted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "secret"+metaExt), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "secret"+modelExt), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := dial(t, dir)
+	for _, version := range []string{"../secret", "..%2Fsecret", "../../etc/passwd", "sub/secret", `..\secret`} {
+		if _, got, err := get(t, c, version); err == nil {
+			t.Errorf("GetModel(%q) succeeded and returned %d bytes; want a rejection", version, len(got))
+		}
 	}
 }
 

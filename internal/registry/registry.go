@@ -215,11 +215,11 @@ func (s *Server) PublishModel(stream beladyv1.Registry_PublishModelServer) error
 	return stream.SendAndClose(&beladyv1.PublishModelResponse{Meta: meta})
 }
 
-// validate is the trust boundary. The trainer is a separate process in another
-// language, so everything it asserts about the blob is checked here rather than
-// assumed, and version is checked as a path component because it becomes a filename.
-func validate(meta *beladyv1.ModelMeta, body []byte) error {
-	version := meta.GetVersion()
+// validVersion rejects anything that is not a bare filename. A version becomes a
+// path component in MODEL_DIR, so this has to hold on every path that turns one
+// into a filename: publishing, where it arrives from the trainer, and GetModel,
+// where it arrives straight from an untrusted request.
+func validVersion(version string) error {
 	switch {
 	case version == "":
 		return errors.New("version is required")
@@ -227,6 +227,16 @@ func validate(meta *beladyv1.ModelMeta, body []byte) error {
 		return errors.New("version is too long")
 	case version != filepath.Base(version), strings.ContainsAny(version, `/\.`):
 		return fmt.Errorf("version %q is not a bare name", version)
+	}
+	return nil
+}
+
+// validate is the trust boundary. The trainer is a separate process in another
+// language, so everything it asserts about the blob is checked here rather than
+// assumed, and version is checked as a path component because it becomes a filename.
+func validate(meta *beladyv1.ModelMeta, body []byte) error {
+	if err := validVersion(meta.GetVersion()); err != nil {
+		return err
 	}
 	if f := meta.GetFormat(); f != "lightgbm-text" {
 		return fmt.Errorf("unsupported format %q", f)
@@ -258,6 +268,10 @@ func (s *Server) GetModel(req *beladyv1.GetModelRequest, stream beladyv1.Registr
 			return status.Error(codes.NotFound, "no model has been published")
 		}
 		version = meta.GetVersion()
+	} else if err := validVersion(version); err != nil {
+		// An empty version resolved from the snapshot above, so it is already a
+		// name this registry wrote. Anything else is caller-supplied.
+		return status.Errorf(codes.InvalidArgument, "%v", err)
 	}
 
 	meta, err := s.store.meta(version)
@@ -274,7 +288,7 @@ func (s *Server) GetModel(req *beladyv1.GetModelRequest, stream beladyv1.Registr
 	}
 
 	modelPath, _ := s.store.paths(version)
-	f, err := os.Open(modelPath) //nolint:gosec // version came from an on-disk metadata file
+	f, err := os.Open(modelPath) //nolint:gosec // version passed validVersion above
 	if err != nil {
 		return status.Errorf(codes.Internal, "opening model %s: %v", version, err)
 	}
