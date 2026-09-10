@@ -97,4 +97,7 @@ jobs:
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          # ignore-error because the cache export runs after the manifest is pushed, so
+          # a flake in the Actions cache service fails a job whose image already shipped.
+          # Seen once as "error writing layer blob: not_found" on the registry image.
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }},ignore-error=true
