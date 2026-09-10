@@ -28,6 +28,9 @@ env:
   TRACE_SEGMENT_BYTES: 256KiB
   TRACE_SEGMENT_MAX_AGE: 5s
   TRACE_SAMPLE_DENOMINATOR: 1
+  # The REST surface is off by default, so the integration run is the only place it
+  # gets exercised against a real cluster rather than a fake node.
+  HTTP_ADDR: ":8090"
   ORIGIN_LATENCY: 200us
   ORIGIN_JITTER: 100us
   REQUESTS: 120000
@@ -49,6 +52,12 @@ jobs:
           cache: true
 
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # Generated per run rather than committed or stored as a secret: it authenticates
+      # a container that exists for three minutes, and a literal in the workflow would
+      # be a token in the repository for no benefit.
+      - name: Generate an HTTP token
+        run: echo "HTTP_AUTH_TOKEN=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
 
       - name: Bring up the cluster
         run: docker compose -f deploy/compose.yaml up -d --build
@@ -83,6 +92,38 @@ jobs:
             jq -e 'length >= 1' >/dev/null ||
             { echo "grafana provisioned no dashboard" >&2; exit 1; }
           echo "7 targets up, grafana datasource and dashboard provisioned"
+
+      # The HTTP surface is the one a person actually uses, so it is exercised against the
+      # real cluster and not just the fake node in the unit tests. There is no 404 to
+      # assert here: this stack is read-through and the origin fixture synthesises a
+      # value for every key, which is itself what the cold/warm check below proves.
+      - name: Exercise the HTTP API
+        run: |
+          api="http://localhost:${GATEWAY_HTTP_PORT:-8090}/v1"
+          auth="Authorization: Bearer $HTTP_AUTH_TOKEN"
+          code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+
+          [ "$(code "$api/keys/anything")" = 401 ] ||
+            { echo "an unauthenticated read was not rejected" >&2; exit 1; }
+          [ "$(code -H "$auth" -X PUT --data-binary 'hello' "$api/keys/x?ttl=100ms")" = 400 ] ||
+            { echo "a sub-second ttl was accepted" >&2; exit 1; }
+
+          curl -fsS -H "$auth" -X PUT --data-binary 'hello' "$api/keys/http-smoke?ttl=5m" >/dev/null
+          got=$(curl -fsS -H "$auth" -D "$RUNNER_TEMP/put.headers" "$api/keys/http-smoke")
+          [ "$got" = hello ] || { echo "read back '$got', want 'hello'" >&2; exit 1; }
+          grep -qi '^x-belady-source: cache' "$RUNNER_TEMP/put.headers" ||
+            { echo "a key written through the api was not served from cache" >&2; exit 1; }
+
+          curl -fsS -H "$auth" -D "$RUNNER_TEMP/cold.headers" -o /dev/null "$api/keys/http-cold"
+          grep -qi '^x-belady-source: origin' "$RUNNER_TEMP/cold.headers" ||
+            { echo "a cold read was not served from origin" >&2; exit 1; }
+          curl -fsS -H "$auth" -D "$RUNNER_TEMP/warm.headers" -o /dev/null "$api/keys/http-cold"
+          grep -qi '^x-belady-source: cache' "$RUNNER_TEMP/warm.headers" ||
+            { echo "a fetched object was not admitted to cache" >&2; exit 1; }
+
+          curl -fsS -H "$auth" -X DELETE "$api/keys/http-smoke" | jq -e '.existed' >/dev/null ||
+            { echo "delete reported the key did not exist" >&2; exit 1; }
+          curl -fsS -H "$auth" "$api/stats" | jq .
 
       # Phase one: the cluster serves traffic correctly with no model at all. The
       # learned policy falls back to sampled eviction until one arrives, so this also

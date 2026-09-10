@@ -20,7 +20,36 @@ The full loop works: the cluster serves traffic, samples access traces, trains a
 It runs under Docker Compose with Prometheus and Grafana, and CI covers build, race tests, lint, generated-code drift, vulnerability scanning, and a Compose integration run gated on hit ratio and p99.
 Still to come is the prose in [docs/](docs/); the plan and the open questions are in [ROADMAP.md](ROADMAP.md).
 
+It is not a Redis replacement and does not try to be: no data types beyond bytes, no persistence, no replication, no pub/sub.
+What it is is a cache tier, and the small stack below makes it a usable one.
+
 ## Quick start
+
+Two ways in, depending on whether you want to use the cache or measure it.
+
+### Use it
+
+Two containers, an HTTP API, no origin and no training pipeline.
+
+```sh
+export HTTP_AUTH_TOKEN=$(openssl rand -hex 32)
+make up-min
+```
+
+```sh
+curl -H "Authorization: Bearer $HTTP_AUTH_TOKEN" \
+     -X PUT --data-binary 'hello' 'localhost:8090/v1/keys/greeting?ttl=5m'
+curl -H "Authorization: Bearer $HTTP_AUTH_TOKEN" localhost:8090/v1/keys/greeting
+curl -H "Authorization: Bearer $HTTP_AUTH_TOKEN" localhost:8090/v1/stats
+```
+
+`GET`, `PUT` and `DELETE` on `/v1/keys/{key}`, plus `GET /v1/stats`.
+Keys may contain slashes, `?ttl=` takes a Go duration, and the bearer token is mandatory: the gateway refuses to start with `HTTP_ADDR` set and no token.
+The default policy is S3-FIFO, which needs no model and no trainer.
+
+### Measure it
+
+The full stack: five services, three cache nodes, Prometheus, Grafana, and the learned policy.
 
 ```sh
 cp .env.example .env
@@ -32,6 +61,12 @@ make test    # unit tests with the race detector
 ```
 
 `make help` lists the rest.
+
+### The two modes
+
+A cache node with `ORIGIN_ADDR` set is **read-through**: a miss fetches from origin behind single-flight, admits the result, and returns it.
+Without it the node is **cache-aside**: a miss is simply not found, and the client decides what to do.
+The minimal stack is cache-aside, the full stack is read-through, and the node logs which one it is at startup.
 
 ## Measured results
 
