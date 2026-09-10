@@ -19,11 +19,11 @@ import (
 	"syscall"
 	"time"
 
-	beladyv1 "github.com/JustinK33/newproj/gen/belady/v1"
-	"github.com/JustinK33/newproj/internal/belady"
-	"github.com/JustinK33/newproj/internal/cache"
-	"github.com/JustinK33/newproj/internal/config"
-	"github.com/JustinK33/newproj/internal/grpcx"
+	beladyv1 "github.com/JustinK33/Belady/gen/belady/v1"
+	"github.com/JustinK33/Belady/internal/belady"
+	"github.com/JustinK33/Belady/internal/cache"
+	"github.com/JustinK33/Belady/internal/config"
+	"github.com/JustinK33/Belady/internal/grpcx"
 )
 
 type options struct {

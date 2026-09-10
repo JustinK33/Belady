@@ -12,8 +12,8 @@ import (
 
 	"google.golang.org/grpc"
 
-	beladyv1 "github.com/JustinK33/newproj/gen/belady/v1"
-	"github.com/JustinK33/newproj/internal/hashring"
+	beladyv1 "github.com/JustinK33/Belady/gen/belady/v1"
+	"github.com/JustinK33/Belady/internal/hashring"
 )
 
 // fakeNode is a cache node reduced to a map, so these tests exercise the HTTP

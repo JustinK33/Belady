@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JustinK33/newproj/internal/features"
-	"github.com/JustinK33/newproj/internal/model"
+	"github.com/JustinK33/Belady/internal/features"
+	"github.com/JustinK33/Belady/internal/model"
 )
 
 // staircase builds a model.txt whose prediction is a monotone decreasing step

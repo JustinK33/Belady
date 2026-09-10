@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	beladyv1 "github.com/JustinK33/newproj/gen/belady/v1"
-	"github.com/JustinK33/newproj/internal/cache"
-	"github.com/JustinK33/newproj/internal/features"
+	beladyv1 "github.com/JustinK33/Belady/gen/belady/v1"
+	"github.com/JustinK33/Belady/internal/cache"
+	"github.com/JustinK33/Belady/internal/features"
 )
 
 // lightgbmModel writes a minimal but genuine LightGBM text dump: one tree that

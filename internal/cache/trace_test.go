@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JustinK33/newproj/internal/trace"
+	"github.com/JustinK33/Belady/internal/trace"
 )
 
 func newTraceCache(t *testing.T, shards int) (*Cache, *trace.Recorder, string) {

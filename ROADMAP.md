@@ -69,10 +69,6 @@ Live, under 64 concurrent clients, the same comparison was 8548 ns against 815 n
 The microbenchmark measures a hot model in L1 against a working set that fits in cache and neither is true in the running system, but that is a hypothesis, not an explanation.
 This needs a CPU profile of a cache node under load before `docs/03-performance.md` can honestly claim to explain the number.
 
-**The Go module path is `github.com/JustinK33/newproj` and the repository is `Belady`.**
-Reconciling it touches `go.mod`, every import in the tree, and the `go_package` option in all three protos, which means a mechanical commit that regenerates the stubs.
-Worth doing before anyone else reads the code, and it is your call whether to do it now or after step 16.
-
 **The Belady boundary must be at least one second.**
 `ModelMeta.boundary_seconds` is whole seconds, the registry rejects zero, and a cache node refuses any model whose boundary disagrees with its own `MODEL_BOUNDARY`.
 On a workload whose median reuse time is milliseconds, the smallest legal boundary is already well above the median, which is workable but not obviously right.

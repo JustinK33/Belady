@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package belady.v1;
 
-option go_package = "github.com/JustinK33/newproj/gen/belady/v1;beladyv1";
+option go_package = "github.com/JustinK33/Belady/gen/belady/v1;beladyv1";
 
 // Registry is the only thing the Python trainer and the Go cache nodes share at
 // runtime: the trainer pushes a model, the cache nodes watch for it and pull it.

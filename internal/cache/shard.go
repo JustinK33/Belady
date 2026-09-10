@@ -3,7 +3,7 @@ package cache
 import (
 	"sync"
 
-	"github.com/JustinK33/newproj/internal/trace"
+	"github.com/JustinK33/Belady/internal/trace"
 )
 
 // shard is an independently locked slice of the keyspace. Everything that

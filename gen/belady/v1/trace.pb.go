@@ -168,7 +168,7 @@ const file_belady_v1_trace_proto_rawDesc = "" +
 	"\vAccessBatch\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1a\n" +
 	"\bsequence\x18\x02 \x01(\x04R\bsequence\x121\n" +
-	"\arecords\x18\x03 \x03(\v2\x17.belady.v1.AccessRecordR\arecordsB5Z3github.com/JustinK33/newproj/gen/belady/v1;beladyv1b\x06proto3"
+	"\arecords\x18\x03 \x03(\v2\x17.belady.v1.AccessRecordR\arecordsB4Z2github.com/JustinK33/Belady/gen/belady/v1;beladyv1b\x06proto3"
 
 var (
 	file_belady_v1_trace_proto_rawDescOnce sync.Once

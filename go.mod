@@ -1,4 +1,4 @@
-module github.com/JustinK33/newproj
+module github.com/JustinK33/Belady
 
 go 1.26.8
 

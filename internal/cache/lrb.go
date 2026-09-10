@@ -5,8 +5,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/JustinK33/newproj/internal/features"
-	"github.com/JustinK33/newproj/internal/model"
+	"github.com/JustinK33/Belady/internal/features"
+	"github.com/JustinK33/Belady/internal/model"
 )
 
 // ModelHolder is the one place a trained model lives, shared by every shard.

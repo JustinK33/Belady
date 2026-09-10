@@ -777,7 +777,7 @@ const file_belady_v1_cache_proto_rawDesc = "" +
 	"\x06Delete\x12\x18.belady.v1.DeleteRequest\x1a\x19.belady.v1.DeleteResponse\x12:\n" +
 	"\x05Stats\x12\x17.belady.v1.StatsRequest\x1a\x18.belady.v1.StatsResponse2D\n" +
 	"\x06Origin\x12:\n" +
-	"\x05Fetch\x12\x17.belady.v1.FetchRequest\x1a\x18.belady.v1.FetchResponseB5Z3github.com/JustinK33/newproj/gen/belady/v1;beladyv1b\x06proto3"
+	"\x05Fetch\x12\x17.belady.v1.FetchRequest\x1a\x18.belady.v1.FetchResponseB4Z2github.com/JustinK33/Belady/gen/belady/v1;beladyv1b\x06proto3"
 
 var (
 	file_belady_v1_cache_proto_rawDescOnce sync.Once

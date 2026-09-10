@@ -14,10 +14,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/grpc"
 
-	beladyv1 "github.com/JustinK33/newproj/gen/belady/v1"
-	"github.com/JustinK33/newproj/internal/cache"
-	"github.com/JustinK33/newproj/internal/model"
-	"github.com/JustinK33/newproj/internal/obs"
+	beladyv1 "github.com/JustinK33/Belady/gen/belady/v1"
+	"github.com/JustinK33/Belady/internal/cache"
+	"github.com/JustinK33/Belady/internal/model"
+	"github.com/JustinK33/Belady/internal/obs"
 )
 
 var (

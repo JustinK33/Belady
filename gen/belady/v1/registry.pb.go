@@ -606,7 +606,7 @@ const file_belady_v1_registry_proto_rawDesc = "" +
 	"\bGetModel\x12\x1a.belady.v1.GetModelRequest\x1a\x1b.belady.v1.GetModelResponse0\x01\x12E\n" +
 	"\vWatchModels\x12\x1d.belady.v1.WatchModelsRequest\x1a\x15.belady.v1.ModelEvent0\x01\x12I\n" +
 	"\n" +
-	"ListModels\x12\x1c.belady.v1.ListModelsRequest\x1a\x1d.belady.v1.ListModelsResponseB5Z3github.com/JustinK33/newproj/gen/belady/v1;beladyv1b\x06proto3"
+	"ListModels\x12\x1c.belady.v1.ListModelsRequest\x1a\x1d.belady.v1.ListModelsResponseB4Z2github.com/JustinK33/Belady/gen/belady/v1;beladyv1b\x06proto3"
 
 var (
 	file_belady_v1_registry_proto_rawDescOnce sync.Once

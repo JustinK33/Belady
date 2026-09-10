@@ -19,7 +19,7 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 
-	"github.com/JustinK33/newproj/internal/obs"
+	"github.com/JustinK33/Belady/internal/obs"
 )
 
 const (

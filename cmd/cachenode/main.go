@@ -17,13 +17,13 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	beladyv1 "github.com/JustinK33/newproj/gen/belady/v1"
-	"github.com/JustinK33/newproj/internal/cache"
-	"github.com/JustinK33/newproj/internal/config"
-	"github.com/JustinK33/newproj/internal/grpcx"
-	"github.com/JustinK33/newproj/internal/obs"
-	"github.com/JustinK33/newproj/internal/registry"
-	"github.com/JustinK33/newproj/internal/trace"
+	beladyv1 "github.com/JustinK33/Belady/gen/belady/v1"
+	"github.com/JustinK33/Belady/internal/cache"
+	"github.com/JustinK33/Belady/internal/config"
+	"github.com/JustinK33/Belady/internal/grpcx"
+	"github.com/JustinK33/Belady/internal/obs"
+	"github.com/JustinK33/Belady/internal/registry"
+	"github.com/JustinK33/Belady/internal/trace"
 )
 
 type server struct {

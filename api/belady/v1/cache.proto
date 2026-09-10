@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package belady.v1;
 
-option go_package = "github.com/JustinK33/newproj/gen/belady/v1;beladyv1";
+option go_package = "github.com/JustinK33/Belady/gen/belady/v1;beladyv1";
 
 // Cache is implemented by both the gateway and the cache nodes. The gateway is a
 // routing proxy in front of the same interface, so a client can talk to either

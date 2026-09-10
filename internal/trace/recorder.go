@@ -25,7 +25,7 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
-	beladyv1 "github.com/JustinK33/newproj/gen/belady/v1"
+	beladyv1 "github.com/JustinK33/Belady/gen/belady/v1"
 )
 
 // Extension marks a finished segment. Files are written under a temporary name and

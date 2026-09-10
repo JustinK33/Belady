@@ -22,7 +22,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/JustinK33/newproj/internal/cache"
+	"github.com/JustinK33/Belady/internal/cache"
 )
 
 var ErrEmpty = errors.New("hashring: no nodes")

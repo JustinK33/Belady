@@ -1,6 +1,6 @@
 package cache
 
-import "github.com/JustinK33/newproj/internal/features"
+import "github.com/JustinK33/Belady/internal/features"
 
 // HistoryLen is how many inter-access gaps each entry remembers, and it is the
 // feature package's constant rather than its own number: the history an entry keeps

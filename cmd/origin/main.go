@@ -10,11 +10,11 @@ import (
 	"syscall"
 	"time"
 
-	beladyv1 "github.com/JustinK33/newproj/gen/belady/v1"
-	"github.com/JustinK33/newproj/internal/cache"
-	"github.com/JustinK33/newproj/internal/config"
-	"github.com/JustinK33/newproj/internal/grpcx"
-	"github.com/JustinK33/newproj/internal/obs"
+	beladyv1 "github.com/JustinK33/Belady/gen/belady/v1"
+	"github.com/JustinK33/Belady/internal/cache"
+	"github.com/JustinK33/Belady/internal/config"
+	"github.com/JustinK33/Belady/internal/grpcx"
+	"github.com/JustinK33/Belady/internal/obs"
 )
 
 type server struct {

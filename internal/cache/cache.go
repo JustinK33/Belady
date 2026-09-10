@@ -12,7 +12,7 @@ import (
 	"math/bits"
 	"time"
 
-	"github.com/JustinK33/newproj/internal/trace"
+	"github.com/JustinK33/Belady/internal/trace"
 )
 
 type Config struct {
