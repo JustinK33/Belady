@@ -18,7 +18,7 @@ That constraint is the point: it forces flattened cache-friendly tree layouts, s
 
 The full loop works: the cluster serves traffic, samples access traces, trains a model from them, publishes it, and the cache nodes install it without a restart.
 It runs under Docker Compose with Prometheus and Grafana, and CI covers build, race tests, lint, generated-code drift, vulnerability scanning, and a Compose integration run gated on hit ratio and p99.
-Still to come is the prose in [docs/](docs/); the plan and the open questions are in [ROADMAP.md](ROADMAP.md).
+The reasoning behind it is written up in [docs/](docs/), including nine decision records; the plan and the open questions are in [ROADMAP.md](ROADMAP.md).
 
 It is not a Redis replacement and does not try to be: no data types beyond bytes, no persistence, no replication, no pub/sub.
 What it is is a cache tier, and the small stack below makes it a usable one.
@@ -98,7 +98,7 @@ Numbers are reproducible with `make bench`; see [docs/03-performance.md](docs/03
 | `trainer` | Python | Offline labeling and LightGBM training |
 | `origin` | Go | Test-fixture backing store |
 
-Full diagram: [`docs/diagrams/architecture.excalidraw`](docs/diagrams/architecture.excalidraw).
+Topology and request-path diagrams: [docs/01-architecture.md](docs/01-architecture.md).
 
 ## What building this taught me
 

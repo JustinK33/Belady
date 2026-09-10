@@ -4,8 +4,9 @@
 
 Belady is a research and portfolio project.
 It is built to production hygiene standards but it has never run in production, and two things in particular are deliberately unfinished:
-gRPC runs without TLS in the default configuration, and there is no authentication on any service.
-Both are documented as such in [docs/06-security.md](docs/06-security.md) rather than hidden.
+gRPC has no transport security at all, not merely off by default, and nothing authenticates between services.
+The gateway's REST surface is the exception, and its bearer token is mandatory rather than optional.
+Both gaps are documented as such in [docs/06-security.md](docs/06-security.md) rather than hidden.
 Do not expose a Belady cluster to a network you do not control.
 
 ## Reporting a vulnerability
@@ -28,7 +29,7 @@ In scope:
 
 Out of scope:
 
-- The absence of TLS and authentication in the default configuration, which is a known and documented gap rather than a finding.
+- The absence of TLS and of inter-service authentication, which is a known and documented gap rather than a finding.
 - Denial of service by simply sending more load than the configured limits allow.
 - Findings that require the operator to be already root on the host.
 - The `origin` service, which is a test fixture and makes no security claims at all.
