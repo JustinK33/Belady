@@ -73,10 +73,11 @@ proto: ## Regenerate gRPC stubs from api/**/*.proto
 		--go_out=gen --go_opt=paths=source_relative \
 		--go-grpc_out=gen --go-grpc_opt=paths=source_relative \
 		api/belady/v1/*.proto
+	@$(MAKE) --no-print-directory -C trainer proto
 
 .PHONY: proto-check
 proto-check: proto ## Fail if generated stubs are stale
-	@git diff --exit-code -- gen || { echo "generated protobuf code is stale: run make proto"; exit 1; }
+	@git diff --exit-code -- gen trainer/belady || { echo "generated protobuf code is stale: run make proto"; exit 1; }
 
 .PHONY: up
 up: ## Bring up the cluster
