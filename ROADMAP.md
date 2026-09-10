@@ -3,7 +3,7 @@
 What is built, what is next, and what has been deliberately left out.
 Kept in the repo rather than in an issue tracker so the plan and the code go stale together, which at least makes the drift visible.
 
-Last reviewed 2026-09-09.
+Last reviewed 2026-09-10.
 
 ## Where the project stands
 
@@ -26,7 +26,7 @@ The learned policy beats sampled LRU on hit ratio by 0.62 points and costs rough
 | 12 | Python trainer: labelling, training, publishing | done |
 | 13 | Docker images, Compose stack, Prometheus and Grafana | done |
 | 14 | GitHub Actions, Dependabot, security and contributor docs | done |
-| 15 | `docs/` prose, eight ADRs, the architecture diagram | next |
+| 15 | `docs/` prose, nine ADRs, the architecture diagrams | done |
 | 16 | Final measured pass, numbers into the docs | next |
 | 17 | Usable mode: REST surface, per-entry TTL, optional origin, two-container stack | done |
 
@@ -39,35 +39,41 @@ It came from asking what it would take to actually use this rather than only mea
 The default policy moved from LRB to S3-FIFO in the same pass, because LRB with no trained model is sampled eviction under a misleading name.
 None of it changes the measurement path: `loadgen` never sets a TTL and `CACHE_DEFAULT_TTL` is zero, so entries still leave only by eviction, which is what makes "gap to Belady MIN" a statement about the policy.
 
+## Step 15, as built
+
+The six prose documents and nine ADRs are in [docs/](docs/), indexed by [docs/README.md](docs/README.md).
+
+Two things came out differently from the plan.
+
+The diagram is two Mermaid blocks in `docs/01-architecture.md` rather than an Excalidraw scene.
+Mermaid renders inline on GitHub, needs no external tool to open, and changes in the same diff as the prose it explains.
+The plan's requirement was a strict grid with no overlapping arrows or labels, and that survived the format change: the first topology layout fanned out to three cache nodes and produced crossing arrows, so it was redrawn as one collapsed node, which is also the more honest picture given that all three nodes are identical.
+
+There are nine ADRs rather than eight, because trace capture via segment files was already being cross-referenced as 0004 by the prose and is a genuine decision with a losing alternative.
+
+Writing `docs/06-security.md` found a real bug: `Registry.GetModel` passed an unvalidated request-supplied version to `filepath.Join`, so a version of `../secret` read a model file from outside `MODEL_DIR`.
+Fixed in `a8db709` with `validVersion` applied to both the publish and read paths, and a regression test.
+Documentation that only restates the code cannot find anything; documentation that has to state the invariant out loud can.
+
 ## Next
-
-### Step 15: documentation and the diagram
-
-The code carries only the comments that explain something non-obvious; the prose belongs in `docs/`.
-
-- `docs/README.md` as an index.
-- `docs/01-architecture.md`: the five services, the request path, where state lives, why the boundaries fall where they do.
-- `docs/02-learned-eviction.md`: Belady's MIN, the Relaxed Belady boundary, the feature vector, how labels are derived, why snapshot offset matters more than the booster, and why an opt-in TTL does not invalidate the MIN baseline as long as the measured runs do not set one.
-- `docs/03-performance.md`: the budgets, the allocation strategy, the microbenchmarks, and the measured cluster numbers with the method spelled out.
-- `docs/04-api.md`: the gRPC contract, deadlines, message size caps, error semantics, and the REST surface alongside it - the route table, TTL semantics and why sub-second TTLs are rejected rather than truncated, and how gRPC codes map onto HTTP statuses.
-- `docs/05-operations.md`: running it, the two modes and how to pick one, `HTTP_AUTH_TOKEN` and why a set `HTTP_ADDR` without one is a refusal to start, tuning capacity and shards, choosing the boundary, reading the metrics, when a trace segment becomes trainable, and why the images carry an empty `/var/lib/belady` owned by uid 65532 - Docker seeds a new named volume from the image, which is the only way a distroless non-root container can write to one, and a Linux bind mount via `make up-dev` still needs a `user:` override or a chown.
-- `docs/06-security.md`: the threat model, what is hardened, and the two known gaps.
-- Eight ADRs: the Go and Python split, gRPC over HTTP, sampled eviction over a global priority queue, a hand-rolled Go evaluator over CGO or ONNX, in-memory slab over mmap, consistent hashing with bounded loads, Compose over Kubernetes, and committing generated protobuf code.
-- `docs/diagrams/architecture.excalidraw`: two scenes, black strokes only, on a strict grid with no overlapping arrows or labels.
 
 ### Step 16: the final measured pass
 
-Run the whole thing once more from a clean state, paste the numbers into `docs/03-performance.md`, and update the README headline if they move.
+Mostly landed already: `docs/03-performance.md` carries a full measured pass with the method spelled out, and the microbenchmark figures in it reproduce within run-to-run noise.
+What is left is a confirmation run from a clean state, and updating the README headline if the numbers move.
 
 ## Known open items
 
 These are real, they are not blocked on anything, and they are ordered by how much they bother me.
 
-**The live eviction penalty is two orders of magnitude worse than the microbenchmark predicts.**
-In isolation LRB eviction costs 274 ns/victim against LRU's 219 ns.
-Live, under 64 concurrent clients, the same comparison was 8548 ns against 815 ns, and the containerised CI run measured 11,781 ns.
-The microbenchmark measures a hot model in L1 against a working set that fits in cache and neither is true in the running system, but that is a hypothesis, not an explanation.
-This needs a CPU profile of a cache node under load before `docs/03-performance.md` can honestly claim to explain the number.
+**The live eviction penalty is about 7x worse than the microbenchmark predicts, and that remainder is unexplained.**
+This item used to read "two orders of magnitude, unexplained" against microbenchmark figures of 274 ns/victim for LRB and 219 ns for LRU.
+Both were superseded by the measured pass, which reproduces at 195 ns for LRU and 254 to 261 ns for LRB, and `docs/03-performance.md` explains most of the apparent gap: `BenchmarkEvict/lrb` installs a synthetic single-tree, 25-leaf model, so reading its result as a prediction for a 31-tree fit was the mistake.
+Corrected, the prediction is ~1.2 µs/victim against 8.5 µs measured live, so the real discrepancy is about 7x rather than 30x.
+
+The plausible causes are a hot model and a cache-resident working set in the microbenchmark against a 6 MiB working set of pointer-chased map entries live, plus `evict_ns_mean` including time the goroutine spent descheduled under contention.
+Neither has been demonstrated, and this still needs a CPU profile of a cache node under load.
+`/debug/pprof` is on every service's debug port, so the data is one command away; the work is doing it and reading it.
 
 **The Belady boundary must be at least one second.**
 `ModelMeta.boundary_seconds` is whole seconds, the registry rejects zero, and a cache node refuses any model whose boundary disagrees with its own `MODEL_BOUNDARY`.
@@ -109,12 +115,19 @@ It is a deliberate simplification with a marked ceiling in `samples.py`, and the
 The registry already supports rollout and the nodes already watch it, so the missing piece is a scheduler and a rule for when a new model is better than the one in production.
 That rule is the hard part and it needs shadow scoring, not a cron entry.
 
+**A purpose-built binary protocol on the hot path.**
+Named as the rejected alternative in [ADR 0002](docs/adr/0002-grpc-for-internal-apis.md), because it is the option that could genuinely beat gRPC rather than lose to it: RESP or something memcached-shaped, length-prefixed framing over raw TCP, no HTTP/2 and no protobuf on `Cache.Get`.
+It is below the profiling work on purpose.
+Optimising a transport before knowing where the eviction microseconds actually go is the wrong order, and the honest version of this item is a measurement first: what fraction of per-request time is framing and encoding?
+Note also that `loadgen` is a gRPC client, so any change here has to keep the measurement path comparable or restate every number in `docs/03-performance.md`.
+
 **mTLS between services.**
-Documented as the production path today with an insecure dev fallback that logs a warning.
-The work is certificate issuance and rotation, which is why it is not in v1.
+gRPC has no transport security at all today, not merely off by default: `grpcx.Dial` passes insecure credentials unconditionally.
+The work is certificate issuance and rotation rather than the dozen lines that install the credentials, which is why it is not in v1.
+See [docs/06-security.md](docs/06-security.md).
 
 **Kubernetes manifests.**
-Deferred to an ADR on purpose.
+Deferred on purpose in [ADR 0008](docs/adr/0008-compose-over-kubernetes.md).
 Compose is the right substrate for a project whose point is measurement, and a Helm chart would add operational surface without adding a single number to the results.
 
 ## Out of scope
