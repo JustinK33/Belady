@@ -26,7 +26,8 @@ message GetRequest {
 
 message GetResponse {
   bytes value = 1;
-  // found is false only when the object exists in neither the cache nor origin.
+  // found is false when the object is in neither the cache nor origin. A node with
+  // no ORIGIN_ADDR has no origin to consult, so there a miss is simply not found.
   bool found = 2;
   Source source = 3;
   // served_by names the cache node that handled the request, so routing can be
@@ -37,6 +38,13 @@ message GetResponse {
 message PutRequest {
   string key = 1;
   bytes value = 2;
+  // ttl_seconds expires the entry independently of the eviction policy. Zero means
+  // the node's CACHE_DEFAULT_TTL applies, which is itself zero by default, and zero
+  // there means the entry only ever leaves by eviction or Delete.
+  //
+  // Seconds rather than milliseconds because a TTL finer than the policy's own
+  // decision interval is not something a cache can honour meaningfully.
+  uint32 ttl_seconds = 3;
 }
 
 message PutResponse {
@@ -72,6 +80,11 @@ message StatsResponse {
   uint64 admissions = 8;
   uint64 rejections = 9;
   uint64 evictions = 10;
+  // expirations counts entries dropped because their TTL had passed. Kept apart from
+  // evictions because the two say different things: evictions mean the cache is too
+  // small, expirations mean the data was too old, and only the first is a capacity
+  // problem.
+  uint64 expirations = 17;
 
   uint64 objects = 11;
   uint64 bytes_used = 12;

@@ -34,6 +34,7 @@ type shard struct {
 	hitBytes, missBytes  uint64
 	admissions, rejects  uint64
 	evictions            uint64
+	expirations          uint64
 	evictNS, evictSample uint64
 
 	mu sync.Mutex
@@ -96,6 +97,14 @@ func (s *shard) get(key uint64, nowUS int64) ([]byte, bool) {
 		s.misses++
 		return nil, false
 	}
+	// Expiry is resolved here rather than by a sweeper, so a stale entry is never
+	// served and the read that would have hit pays for the cleanup.
+	if e.expired(nowUS) {
+		s.drop(key, e)
+		s.expirations++
+		s.misses++
+		return nil, false
+	}
 	e.touch(nowUS)
 	s.policy.OnAccess(e)
 	s.hits++
@@ -104,10 +113,19 @@ func (s *shard) get(key uint64, nowUS int64) ([]byte, bool) {
 	return e.value, true
 }
 
+// drop removes an entry and keeps the byte accounting and the policy in step. The
+// caller holds the lock and owns whichever counter the removal should be charged to.
+func (s *shard) drop(key uint64, e *Entry) {
+	delete(s.m, key)
+	s.used -= int64(e.size)
+	s.policy.OnRemove(e)
+}
+
 // insert stores value, evicting as needed. onMiss marks the insert as an
 // admission following a cache miss, which is what byte hit ratio is measured
-// against; a client-driven write is not a miss.
-func (s *shard) insert(key uint64, value []byte, nowUS int64, onMiss bool) bool {
+// against; a client-driven write is not a miss. expires is a microsecond deadline,
+// or 0 for no TTL.
+func (s *shard) insert(key uint64, value []byte, nowUS, expires int64, onMiss bool) bool {
 	size := int64(len(value))
 
 	s.mu.Lock()
@@ -125,9 +143,7 @@ func (s *shard) insert(key uint64, value []byte, nowUS int64, onMiss bool) bool 
 	}
 
 	if old, ok := s.m[key]; ok {
-		s.used -= int64(old.size)
-		delete(s.m, key)
-		s.policy.OnRemove(old)
+		s.drop(key, old)
 	}
 
 	for s.used+size > s.capacity {
@@ -142,6 +158,7 @@ func (s *shard) insert(key uint64, value []byte, nowUS int64, onMiss bool) bool 
 		key:        key,
 		lastAccess: nowUS,
 		admitted:   nowUS,
+		expires:    expires,
 		size:       int32(size),
 		accesses:   1,
 		freq:       1,
@@ -173,9 +190,7 @@ func (s *shard) evictOne(nowUS int64) bool {
 		// policy, but eviction must still terminate.
 		return false
 	}
-	delete(s.m, victim)
-	s.used -= int64(e.size)
-	s.policy.OnRemove(e)
+	s.drop(victim, e)
 	s.evictions++
 	return true
 }
@@ -188,8 +203,6 @@ func (s *shard) remove(key uint64) bool {
 	if !ok {
 		return false
 	}
-	delete(s.m, key)
-	s.used -= int64(e.size)
-	s.policy.OnRemove(e)
+	s.drop(key, e)
 	return true
 }

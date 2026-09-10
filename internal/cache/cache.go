@@ -29,6 +29,11 @@ type Config struct {
 	// have been built with RoundShards(Shards) rings.
 	Trace *trace.Recorder
 
+	// DefaultTTL expires entries that were stored without one. Zero, the default,
+	// means entries leave only by eviction or Delete, which is the behaviour every
+	// policy measurement in this repo depends on.
+	DefaultTTL time.Duration
+
 	CapacityBytes int64
 	// Shards is rounded up to a power of two so shard selection is a mask.
 	Shards int
@@ -40,10 +45,11 @@ type Config struct {
 }
 
 type Cache struct {
-	nowUS  func() int64
-	policy string
-	shards []*shard
-	mask   uint64
+	nowUS      func() int64
+	policy     string
+	shards     []*shard
+	mask       uint64
+	defaultTTL time.Duration
 }
 
 // Stats is a point-in-time sum across shards. Object hit ratio and byte hit ratio
@@ -57,6 +63,11 @@ type Stats struct {
 	HitBytes, MissBytes uint64
 
 	Admissions, Rejections, Evictions uint64
+
+	// Expirations counts entries dropped on a TTL rather than by the policy. A cache
+	// where this dominates evictions is not capacity-bound, whatever its hit ratio
+	// suggests.
+	Expirations uint64
 
 	Objects       uint64
 	BytesUsed     uint64
@@ -90,6 +101,7 @@ func (c *Cache) Snapshot() Stats {
 		st.Admissions += s.admissions
 		st.Rejections += s.rejects
 		st.Evictions += s.evictions
+		st.Expirations += s.expirations
 		st.Objects += uint64(len(s.m))
 		st.BytesUsed += uint64(s.used)
 		st.BytesCapacity += uint64(s.capacity)
@@ -145,10 +157,11 @@ func New(cfg Config) (*Cache, error) {
 	}
 
 	c := &Cache{
-		nowUS:  cfg.NowUS,
-		shards: make([]*shard, n),
-		mask:   uint64(n - 1),
-		policy: cfg.NewPolicy(per).Name(),
+		nowUS:      cfg.NowUS,
+		shards:     make([]*shard, n),
+		mask:       uint64(n - 1),
+		policy:     cfg.NewPolicy(per).Name(),
+		defaultTTL: cfg.DefaultTTL,
 	}
 	for i := range c.shards {
 		var ring *trace.Ring
@@ -171,14 +184,27 @@ func (c *Cache) Get(key string) ([]byte, bool) {
 // reports whether it was cached; a false does not mean the request failed.
 func (c *Cache) Admit(key string, value []byte) bool {
 	h := Hash(key)
-	return c.shardFor(h).insert(h, value, c.nowUS(), true)
+	now := c.nowUS()
+	return c.shardFor(h).insert(h, value, now, c.deadline(now, 0), true)
 }
 
 // Put stores an object on behalf of a client. Unlike Admit it is not counted as
-// a miss, so it does not distort hit ratio.
-func (c *Cache) Put(key string, value []byte) bool {
+// a miss, so it does not distort hit ratio. A ttl of zero or less means DefaultTTL.
+func (c *Cache) Put(key string, value []byte, ttl time.Duration) bool {
 	h := Hash(key)
-	return c.shardFor(h).insert(h, value, c.nowUS(), false)
+	now := c.nowUS()
+	return c.shardFor(h).insert(h, value, now, c.deadline(now, ttl), false)
+}
+
+// deadline converts a TTL into an absolute microsecond deadline, or 0 for none.
+func (c *Cache) deadline(nowUS int64, ttl time.Duration) int64 {
+	if ttl <= 0 {
+		ttl = c.defaultTTL
+	}
+	if ttl <= 0 {
+		return 0
+	}
+	return nowUS + ttl.Microseconds()
 }
 
 func (c *Cache) Delete(key string) bool {

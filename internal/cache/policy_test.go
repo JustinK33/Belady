@@ -177,7 +177,7 @@ func BenchmarkGetHit(b *testing.B) {
 	keys := make([]string, 1024)
 	for i := range keys {
 		keys[i] = fmt.Sprintf("key-%d", i)
-		c.Put(keys[i], make([]byte, 512))
+		c.Put(keys[i], make([]byte, 512), 0)
 	}
 
 	b.ReportAllocs()
@@ -201,7 +201,7 @@ func TestEvictionDoesNotAllocate(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s := newShard(1<<20, 8, mk(1<<20), func() int64 { return 0 }, nil)
 			for i := range 2048 {
-				s.insert(uint64(i), make([]byte, 256), int64(i)*1000, false)
+				s.insert(uint64(i), make([]byte, 256), int64(i)*1000, 0, false)
 			}
 			if n := testing.AllocsPerRun(200, func() { s.evictOne(1 << 30) }); n != 0 {
 				t.Errorf("%s allocated %v times per eviction", name, n)
@@ -224,7 +224,7 @@ func BenchmarkEvict(b *testing.B) {
 			}
 			value := make([]byte, 512)
 			for i := range 2048 {
-				c.Put(fmt.Sprintf("warm-%d", i), value)
+				c.Put(fmt.Sprintf("warm-%d", i), value, 0)
 			}
 
 			b.ReportAllocs()

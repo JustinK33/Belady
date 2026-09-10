@@ -21,6 +21,12 @@ type Entry struct {
 	key        uint64
 	lastAccess int64 // microseconds since the Unix epoch
 	admitted   int64 // microseconds since the Unix epoch
+	// expires is a microsecond deadline, or 0 for an entry that never expires. It is
+	// checked on read and never by a background sweeper.
+	// ponytail: lazy expiry, so an expired entry holds its bytes until something
+	// touches it or the policy evicts it. An active sweep is the upgrade, and the
+	// signal to do it is bytes_used staying high while the hit ratio falls.
+	expires int64
 
 	// deltas[0] is the gap before the most recent access, in milliseconds.
 	// Milliseconds rather than the paper's seconds because a local cache sees
@@ -39,12 +45,17 @@ func (e *Entry) Size() int32           { return e.size }
 func (e *Entry) LastAccess() int64     { return e.lastAccess }
 func (e *Entry) Admitted() int64       { return e.admitted }
 func (e *Entry) Accesses() uint32      { return e.accesses }
+func (e *Entry) Expires() int64        { return e.expires }
 func (e *Entry) Age(nowUS int64) int64 { return nowUS - e.admitted }
 func (e *Entry) Frequency() uint8      { return e.freq }
 
 // Deltas returns a pointer so callers can read the history without copying 32
 // bytes on a path that runs once per eviction candidate.
 func (e *Entry) Deltas() *[HistoryLen]uint32 { return &e.deltas }
+
+// expired reports whether the entry's TTL has passed. An entry with no TTL never
+// expires, which is the default and the case the benchmark path relies on.
+func (e *Entry) expired(nowUS int64) bool { return e.expires != 0 && nowUS >= e.expires }
 
 // touch folds a new access into the entry's history. Called with the shard lock
 // held, on every hit, so it must not allocate.

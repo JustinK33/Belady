@@ -71,7 +71,7 @@ func warmDisagreement(t *testing.T, c *Cache) {
 	t.Helper()
 	val := make([]byte, 100)
 	for _, k := range []string{"w", "x", "y", "z"} {
-		if !c.Put(k, val) {
+		if !c.Put(k, val, 0) {
 			t.Fatalf("Put %s was rejected", k)
 		}
 	}
@@ -95,7 +95,7 @@ func TestLRBFallsBackToLRUWithNoModel(t *testing.T) {
 	}
 
 	warmDisagreement(t, c)
-	if !c.Put("new", make([]byte, 100)) {
+	if !c.Put("new", make([]byte, 100), 0) {
 		t.Fatal("Put was rejected, so nothing was evicted")
 	}
 
@@ -123,7 +123,7 @@ func TestLRBUsesTheInstalledModel(t *testing.T) {
 
 	c := newTestCache(t, 400, 1, func(int64) Policy { return NewLRB(holder, 8) })
 	warmDisagreement(t, c)
-	if !c.Put("new", make([]byte, 100)) {
+	if !c.Put("new", make([]byte, 100), 0) {
 		t.Fatal("Put was rejected, so nothing was evicted")
 	}
 
@@ -179,7 +179,7 @@ func TestLRBEvictionDoesNotAllocate(t *testing.T) {
 
 	s := newShard(4096, 8, NewLRB(holder, 8), func() int64 { return 0 }, nil)
 	for i := range 40 {
-		s.insert(uint64(i), make([]byte, 100), int64(i)*1000, false)
+		s.insert(uint64(i), make([]byte, 100), int64(i)*1000, 0, false)
 	}
 
 	n := testing.AllocsPerRun(200, func() {
@@ -204,7 +204,7 @@ func BenchmarkLRBVictim(b *testing.B) {
 
 	s := newShard(1<<20, 8, NewLRB(holder, 8), func() int64 { return 0 }, nil)
 	for i := range 4096 {
-		s.insert(uint64(i), make([]byte, 200), int64(i)*1000, false)
+		s.insert(uint64(i), make([]byte, 200), int64(i)*1000, 0, false)
 	}
 
 	b.ReportAllocs()

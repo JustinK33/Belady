@@ -37,7 +37,7 @@ func TestGetPutDelete(t *testing.T) {
 	if _, ok := c.Get("absent"); ok {
 		t.Fatal("Get on empty cache reported a hit")
 	}
-	if !c.Put("a", []byte("hello")) {
+	if !c.Put("a", []byte("hello"), 0) {
 		t.Fatal("Put was not admitted")
 	}
 	got, ok := c.Get("a")
@@ -58,7 +58,7 @@ func TestGetPutDelete(t *testing.T) {
 func TestOverwriteDoesNotLeakCapacity(t *testing.T) {
 	c := newTestCache(t, 1<<16, 1, func(int64) Policy { return NewLRU(5) })
 	for range 100 {
-		c.Put("k", make([]byte, 1000))
+		c.Put("k", make([]byte, 1000), 0)
 	}
 	st := c.Snapshot()
 	if st.Objects != 1 {
@@ -91,9 +91,9 @@ func TestCapacityIsEnforced(t *testing.T) {
 
 func TestOversizedObjectIsRejectedNotThrashed(t *testing.T) {
 	c := newTestCache(t, 1000, 1, func(int64) Policy { return NewLRU(5) })
-	c.Put("small", make([]byte, 500))
+	c.Put("small", make([]byte, 500), 0)
 
-	if c.Put("huge", make([]byte, 2000)) {
+	if c.Put("huge", make([]byte, 2000), 0) {
 		t.Fatal("an object larger than the shard was admitted")
 	}
 	if _, ok := c.Get("small"); !ok {
@@ -109,15 +109,15 @@ func TestLRUEvictsTheColdestSampledEntry(t *testing.T) {
 	// choice is deterministic rather than approximate.
 	c := newTestCache(t, 300, 1, func(int64) Policy { return NewLRU(64) })
 
-	c.Put("a", make([]byte, 100))
-	c.Put("b", make([]byte, 100))
-	c.Put("c", make([]byte, 100))
+	c.Put("a", make([]byte, 100), 0)
+	c.Put("b", make([]byte, 100), 0)
+	c.Put("c", make([]byte, 100), 0)
 
 	// Touch a and b, leaving c the coldest.
 	c.Get("a")
 	c.Get("b")
 
-	c.Put("d", make([]byte, 100))
+	c.Put("d", make([]byte, 100), 0)
 
 	if _, ok := c.Get("c"); ok {
 		t.Error("c was the least recently used but survived")

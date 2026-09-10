@@ -117,7 +117,8 @@ func (x *GetRequest) GetKey() string {
 type GetResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Value []byte                 `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
-	// found is false only when the object exists in neither the cache nor origin.
+	// found is false when the object is in neither the cache nor origin. A node with
+	// no ORIGIN_ADDR has no origin to consult, so there a miss is simply not found.
 	Found  bool   `protobuf:"varint,2,opt,name=found,proto3" json:"found,omitempty"`
 	Source Source `protobuf:"varint,3,opt,name=source,proto3,enum=belady.v1.Source" json:"source,omitempty"`
 	// served_by names the cache node that handled the request, so routing can be
@@ -186,9 +187,16 @@ func (x *GetResponse) GetServedBy() string {
 }
 
 type PutRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
-	Value         []byte                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Key   string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	Value []byte                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	// ttl_seconds expires the entry independently of the eviction policy. Zero means
+	// the node's CACHE_DEFAULT_TTL applies, which is itself zero by default, and zero
+	// there means the entry only ever leaves by eviction or Delete.
+	//
+	// Seconds rather than milliseconds because a TTL finer than the policy's own
+	// decision interval is not something a cache can honour meaningfully.
+	TtlSeconds    uint32 `protobuf:"varint,3,opt,name=ttl_seconds,json=ttlSeconds,proto3" json:"ttl_seconds,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -235,6 +243,13 @@ func (x *PutRequest) GetValue() []byte {
 		return x.Value
 	}
 	return nil
+}
+
+func (x *PutRequest) GetTtlSeconds() uint32 {
+	if x != nil {
+		return x.TtlSeconds
+	}
+	return 0
 }
 
 type PutResponse struct {
@@ -419,20 +434,25 @@ func (*StatsRequest) Descriptor() ([]byte, []int) {
 // comes from hits/(hits+misses); byte hit ratio from hit_bytes/(hit_bytes+miss_bytes).
 // The two diverge whenever object sizes are skewed, which is the usual case.
 type StatsResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
-	Policy        string                 `protobuf:"bytes,2,opt,name=policy,proto3" json:"policy,omitempty"`
-	ModelVersion  string                 `protobuf:"bytes,3,opt,name=model_version,json=modelVersion,proto3" json:"model_version,omitempty"`
-	Hits          uint64                 `protobuf:"varint,4,opt,name=hits,proto3" json:"hits,omitempty"`
-	Misses        uint64                 `protobuf:"varint,5,opt,name=misses,proto3" json:"misses,omitempty"`
-	HitBytes      uint64                 `protobuf:"varint,6,opt,name=hit_bytes,json=hitBytes,proto3" json:"hit_bytes,omitempty"`
-	MissBytes     uint64                 `protobuf:"varint,7,opt,name=miss_bytes,json=missBytes,proto3" json:"miss_bytes,omitempty"`
-	Admissions    uint64                 `protobuf:"varint,8,opt,name=admissions,proto3" json:"admissions,omitempty"`
-	Rejections    uint64                 `protobuf:"varint,9,opt,name=rejections,proto3" json:"rejections,omitempty"`
-	Evictions     uint64                 `protobuf:"varint,10,opt,name=evictions,proto3" json:"evictions,omitempty"`
-	Objects       uint64                 `protobuf:"varint,11,opt,name=objects,proto3" json:"objects,omitempty"`
-	BytesUsed     uint64                 `protobuf:"varint,12,opt,name=bytes_used,json=bytesUsed,proto3" json:"bytes_used,omitempty"`
-	BytesCapacity uint64                 `protobuf:"varint,13,opt,name=bytes_capacity,json=bytesCapacity,proto3" json:"bytes_capacity,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	NodeId       string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Policy       string                 `protobuf:"bytes,2,opt,name=policy,proto3" json:"policy,omitempty"`
+	ModelVersion string                 `protobuf:"bytes,3,opt,name=model_version,json=modelVersion,proto3" json:"model_version,omitempty"`
+	Hits         uint64                 `protobuf:"varint,4,opt,name=hits,proto3" json:"hits,omitempty"`
+	Misses       uint64                 `protobuf:"varint,5,opt,name=misses,proto3" json:"misses,omitempty"`
+	HitBytes     uint64                 `protobuf:"varint,6,opt,name=hit_bytes,json=hitBytes,proto3" json:"hit_bytes,omitempty"`
+	MissBytes    uint64                 `protobuf:"varint,7,opt,name=miss_bytes,json=missBytes,proto3" json:"miss_bytes,omitempty"`
+	Admissions   uint64                 `protobuf:"varint,8,opt,name=admissions,proto3" json:"admissions,omitempty"`
+	Rejections   uint64                 `protobuf:"varint,9,opt,name=rejections,proto3" json:"rejections,omitempty"`
+	Evictions    uint64                 `protobuf:"varint,10,opt,name=evictions,proto3" json:"evictions,omitempty"`
+	// expirations counts entries dropped because their TTL had passed. Kept apart from
+	// evictions because the two say different things: evictions mean the cache is too
+	// small, expirations mean the data was too old, and only the first is a capacity
+	// problem.
+	Expirations   uint64 `protobuf:"varint,17,opt,name=expirations,proto3" json:"expirations,omitempty"`
+	Objects       uint64 `protobuf:"varint,11,opt,name=objects,proto3" json:"objects,omitempty"`
+	BytesUsed     uint64 `protobuf:"varint,12,opt,name=bytes_used,json=bytesUsed,proto3" json:"bytes_used,omitempty"`
+	BytesCapacity uint64 `protobuf:"varint,13,opt,name=bytes_capacity,json=bytesCapacity,proto3" json:"bytes_capacity,omitempty"`
 	// Records sampled into the trace ring, and records dropped because the ring
 	// was full. A nonzero drop count means the shipper is behind, not that
 	// requests were harmed.
@@ -541,6 +561,13 @@ func (x *StatsResponse) GetRejections() uint64 {
 func (x *StatsResponse) GetEvictions() uint64 {
 	if x != nil {
 		return x.Evictions
+	}
+	return 0
+}
+
+func (x *StatsResponse) GetExpirations() uint64 {
+	if x != nil {
+		return x.Expirations
 	}
 	return 0
 }
@@ -695,11 +722,13 @@ const file_belady_v1_cache_proto_rawDesc = "" +
 	"\x05value\x18\x01 \x01(\fR\x05value\x12\x14\n" +
 	"\x05found\x18\x02 \x01(\bR\x05found\x12)\n" +
 	"\x06source\x18\x03 \x01(\x0e2\x11.belady.v1.SourceR\x06source\x12\x1b\n" +
-	"\tserved_by\x18\x04 \x01(\tR\bservedBy\"4\n" +
+	"\tserved_by\x18\x04 \x01(\tR\bservedBy\"U\n" +
 	"\n" +
 	"PutRequest\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\fR\x05value\"F\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value\x12\x1f\n" +
+	"\vttl_seconds\x18\x03 \x01(\rR\n" +
+	"ttlSeconds\"F\n" +
 	"\vPutResponse\x12\x1a\n" +
 	"\badmitted\x18\x01 \x01(\bR\badmitted\x12\x1b\n" +
 	"\tserved_by\x18\x02 \x01(\tR\bservedBy\"!\n" +
@@ -707,7 +736,7 @@ const file_belady_v1_cache_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\"*\n" +
 	"\x0eDeleteResponse\x12\x18\n" +
 	"\aexisted\x18\x01 \x01(\bR\aexisted\"\x0e\n" +
-	"\fStatsRequest\"\xf9\x03\n" +
+	"\fStatsRequest\"\x9b\x04\n" +
 	"\rStatsResponse\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x16\n" +
 	"\x06policy\x18\x02 \x01(\tR\x06policy\x12#\n" +
@@ -724,7 +753,8 @@ const file_belady_v1_cache_proto_rawDesc = "" +
 	"rejections\x18\t \x01(\x04R\n" +
 	"rejections\x12\x1c\n" +
 	"\tevictions\x18\n" +
-	" \x01(\x04R\tevictions\x12\x18\n" +
+	" \x01(\x04R\tevictions\x12 \n" +
+	"\vexpirations\x18\x11 \x01(\x04R\vexpirations\x12\x18\n" +
 	"\aobjects\x18\v \x01(\x04R\aobjects\x12\x1d\n" +
 	"\n" +
 	"bytes_used\x18\f \x01(\x04R\tbytesUsed\x12%\n" +
