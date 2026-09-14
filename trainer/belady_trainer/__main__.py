@@ -92,7 +92,14 @@ def cmd_train(args: argparse.Namespace) -> int:
     except train_mod.DegenerateLabels as err:
         median = samples.suggest_boundary_us(trace.key, trace.timestamp_us)
         print(f"error: {err}", file=sys.stderr)
-        print(f"hint: the median reuse time in this trace is {median / 1e6:g}s", file=sys.stderr)
+        print(
+            f"hint: the median reuse time in this trace is {median / 1e6:g}s, so try "
+            f"MODEL_BOUNDARY near there. Run `boundary` for the full distribution: a "
+            f"boundary above p99 labels nothing 'beyond', one below p50 labels "
+            f"everything. Whole seconds only, because that is what the registry "
+            f"metadata carries.",
+            file=sys.stderr,
+        )
         return 2
 
     print(result.summary())

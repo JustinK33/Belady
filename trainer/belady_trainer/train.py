@@ -97,7 +97,7 @@ def fit(data: samples.Samples, *, boundary_us: int, seed: int = 1) -> Result:
         raise DegenerateLabels(
             f"{rate:.4%} of rows are labelled 'beyond boundary', which is too one-sided "
             f"to rank candidates with. The {boundary_us / 1e6:g}s boundary sits outside "
-            "the reuse times in this trace; see the suggested boundary above."
+            "the reuse times in this trace; the hint below suggests one that does not."
         )
 
     order = np.argsort(data.timestamp_us, kind="stable")

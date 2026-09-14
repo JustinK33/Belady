@@ -83,10 +83,10 @@ proto-check: proto ## Fail if generated stubs are stale
 up: ## Bring up the cluster
 	$(COMPOSE) up -d --build
 	@$(MAKE) --no-print-directory wait
-	@echo "gateway     localhost:8080 (grpc)"
-	@echo "registry    localhost:8082 (grpc)"
-	@echo "prometheus  http://localhost:9091"
-	@echo "grafana     http://localhost:3000"
+	@echo "gateway     localhost:$${GATEWAY_PORT:-8080} (grpc)"
+	@echo "registry    localhost:$${REGISTRY_PORT:-8082} (grpc)"
+	@echo "prometheus  http://localhost:$${PROMETHEUS_PORT:-9091}"
+	@echo "grafana     http://localhost:$${GRAFANA_PORT:-3000}"
 
 .PHONY: up-dev
 up-dev: ## Bring up the cluster with host-visible traces, models and node ports
