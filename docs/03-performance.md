@@ -218,7 +218,12 @@ The same CPU profile splits `Victim` cleanly, and the split is what the rebuilt 
 Sampling is 10% of the learned policy's eviction cost.
 The `Entry` layout and the map-range sampling in `shard.Sample` were the obvious things to optimise and they are not where the time is.
 
-The containerised CI run measured 11,781 ns/victim on GitHub's shared runners, which is consistent with the live figure plus virtualisation overhead and is not an independent data point.
+The integration workflow reports **28,968 ns/victim** on GitHub's shared runners against the 8,343 measured here.
+It is not an independent data point, but the direction of both differences is informative: it fit 41 trees rather than 13, which is roughly 3x the tree walk, and it runs the whole cluster on two shared vCPUs, which is more of the same oversubscription that the 6.3x environment factor above measures.
+
+That figure was 11,781 before this pass, and the change is the counter rather than the machine.
+`evict_ns_mean` was a lifetime mean, so the model-loaded replay's evictions were averaged together with the cheap fallback evictions of the replay that captured the trace.
+Windowing it over the measured interval raised the number by 2.5x, which is the clearest single argument for the change: the old figure was not a smaller measurement of the same thing, it was a measurement of a different thing.
 
 ### What the earlier pass could not have been
 
