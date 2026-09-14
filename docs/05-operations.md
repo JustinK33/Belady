@@ -97,6 +97,10 @@ Zero on either gate means report only.
 
 All services take `LOG_LEVEL` (`debug`, `info`, `warn`, `error`) and `LOG_FORMAT` (`json` or `text`).
 
+They also take `PROFILE_CONTENTION`, default `false`, which arms the runtime's mutex and block samplers.
+`/debug/pprof/mutex` and `/debug/pprof/block` exist either way, so with this off they return an empty profile that reads as "no contention" when it actually means "not measured".
+It is off by default because both samplers add work to every lock acquisition and every blocking operation in the process, which is also why a run with it on must not be the run you quote throughput or p99 from.
+
 ## Tuning
 
 ### Capacity

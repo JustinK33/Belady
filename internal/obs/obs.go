@@ -9,12 +9,15 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/JustinK33/Belady/internal/config"
 )
 
 // Registry is this process's metric registry. Using our own rather than the
@@ -46,7 +49,31 @@ func Init(service string) *slog.Logger {
 
 	l := slog.New(h).With("service", service)
 	slog.SetDefault(l)
+	enableContentionProfiles(l)
 	return l
+}
+
+// enableContentionProfiles arms the runtime's mutex and block samplers when
+// PROFILE_CONTENTION is set. /debug/pprof/mutex and /debug/pprof/block exist
+// unconditionally, because pprof.Index serves every registered profile, but
+// without this they return an empty profile and read as "no contention" rather
+// than "not measured".
+//
+// Off by default, and it has to be: both samplers add work to every lock
+// acquisition and every blocking operation in the process. That is also why a run
+// with this on must not be the run that quotes throughput.
+//
+// One switch, and both samplers set to report every event. A diagnostic run wants
+// the whole picture; tuning the sampling rates is a problem for a process too hot
+// to profile at all, which is not this one.
+func enableContentionProfiles(l *slog.Logger) {
+	if !config.Bool("PROFILE_CONTENTION", false) {
+		return
+	}
+	runtime.SetMutexProfileFraction(1)
+	runtime.SetBlockProfileRate(1)
+	l.Warn("contention profiling is on, which costs throughput on every lock and every block; " +
+		"do not quote latency or QPS from this run")
 }
 
 // Serve runs the debug endpoint until ctx is cancelled. It exposes /metrics,
