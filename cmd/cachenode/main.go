@@ -129,6 +129,8 @@ func (s *server) Stats(context.Context, *beladyv1.StatsRequest) (*beladyv1.Stats
 		BytesUsed:     st.BytesUsed,
 		BytesCapacity: st.BytesCapacity,
 		EvictNsMean:   st.EvictNSMean,
+		EvictNs:       st.EvictNS,
+		EvictSample:   st.EvictSample,
 	}, nil
 }
 
@@ -326,6 +328,11 @@ func registerCacheMetrics(c *cache.Cache, rec *trace.Recorder) {
 		{desc("bytes_used", "Bytes currently cached."), func(s cache.Stats) float64 { return float64(s.BytesUsed) }},
 		{desc("bytes_capacity", "Configured capacity."), func(s cache.Stats) float64 { return float64(s.BytesCapacity) }},
 		{desc("evict_ns_mean", "Mean nanoseconds to choose a victim, including one clock read."), func(s cache.Stats) float64 { return float64(s.EvictNSMean) }},
+		// The raw pair behind the mean above. Exported because the mean is over the
+		// process lifetime and cannot be windowed, so a rate() over these two is the
+		// only way to see what eviction costs now rather than on average since boot.
+		{desc("evict_ns_total", "Total nanoseconds spent choosing victims."), func(s cache.Stats) float64 { return float64(s.EvictNS) }},
+		{desc("evict_sample_total", "Victim selections timed."), func(s cache.Stats) float64 { return float64(s.EvictSample) }},
 	}
 
 	// Trace counters come from the recorder rather than the store. The dropped

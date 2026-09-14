@@ -98,7 +98,14 @@ message StatsResponse {
 
   // Mean nanoseconds spent choosing a victim. This is the number the learned
   // policy has to keep small enough to be worth its hit-ratio gain.
+  //
+  // The mean is over the process lifetime, so a client comparing policies should
+  // difference evict_ns and evict_sample across two Stats calls instead. Warming
+  // a cold cache pays its worst evictions first, and a lifetime mean never lets
+  // go of them.
   uint64 evict_ns_mean = 16;
+  uint64 evict_ns = 19;
+  uint64 evict_sample = 20;
 }
 
 // Origin stands in for whatever the cache fronts: a database, an object store,

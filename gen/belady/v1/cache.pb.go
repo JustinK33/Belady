@@ -460,7 +460,14 @@ type StatsResponse struct {
 	TraceDropped uint64 `protobuf:"varint,15,opt,name=trace_dropped,json=traceDropped,proto3" json:"trace_dropped,omitempty"`
 	// Mean nanoseconds spent choosing a victim. This is the number the learned
 	// policy has to keep small enough to be worth its hit-ratio gain.
+	//
+	// The mean is over the process lifetime, so a client comparing policies should
+	// difference evict_ns and evict_sample across two Stats calls instead. Warming
+	// a cold cache pays its worst evictions first, and a lifetime mean never lets
+	// go of them.
 	EvictNsMean   uint64 `protobuf:"varint,16,opt,name=evict_ns_mean,json=evictNsMean,proto3" json:"evict_ns_mean,omitempty"`
+	EvictNs       uint64 `protobuf:"varint,19,opt,name=evict_ns,json=evictNs,proto3" json:"evict_ns,omitempty"`
+	EvictSample   uint64 `protobuf:"varint,20,opt,name=evict_sample,json=evictSample,proto3" json:"evict_sample,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -614,6 +621,20 @@ func (x *StatsResponse) GetEvictNsMean() uint64 {
 	return 0
 }
 
+func (x *StatsResponse) GetEvictNs() uint64 {
+	if x != nil {
+		return x.EvictNs
+	}
+	return 0
+}
+
+func (x *StatsResponse) GetEvictSample() uint64 {
+	if x != nil {
+		return x.EvictSample
+	}
+	return 0
+}
+
 type FetchRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
@@ -736,7 +757,7 @@ const file_belady_v1_cache_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\"*\n" +
 	"\x0eDeleteResponse\x12\x18\n" +
 	"\aexisted\x18\x01 \x01(\bR\aexisted\"\x0e\n" +
-	"\fStatsRequest\"\x9b\x04\n" +
+	"\fStatsRequest\"\xd9\x04\n" +
 	"\rStatsResponse\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x16\n" +
 	"\x06policy\x18\x02 \x01(\tR\x06policy\x12#\n" +
@@ -761,7 +782,9 @@ const file_belady_v1_cache_proto_rawDesc = "" +
 	"\x0ebytes_capacity\x18\r \x01(\x04R\rbytesCapacity\x12#\n" +
 	"\rtrace_sampled\x18\x0e \x01(\x04R\ftraceSampled\x12#\n" +
 	"\rtrace_dropped\x18\x0f \x01(\x04R\ftraceDropped\x12\"\n" +
-	"\revict_ns_mean\x18\x10 \x01(\x04R\vevictNsMean\" \n" +
+	"\revict_ns_mean\x18\x10 \x01(\x04R\vevictNsMean\x12\x19\n" +
+	"\bevict_ns\x18\x13 \x01(\x04R\aevictNs\x12!\n" +
+	"\fevict_sample\x18\x14 \x01(\x04R\vevictSample\" \n" +
 	"\fFetchRequest\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\";\n" +
 	"\rFetchResponse\x12\x14\n" +

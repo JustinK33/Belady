@@ -217,6 +217,8 @@ func (a *httpAPI) stats(w http.ResponseWriter, r *http.Request) {
 		"expirations":      st.GetExpirations(),
 		"rejections":       st.GetRejections(),
 		"evict_ns_mean":    st.GetEvictNsMean(),
+		"evict_ns":         st.GetEvictNs(),
+		"evict_sample":     st.GetEvictSample(),
 	})
 }
 

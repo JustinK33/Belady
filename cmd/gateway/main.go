@@ -124,12 +124,12 @@ func (s *server) Delete(ctx context.Context, req *beladyv1.DeleteRequest) (*bela
 	return &beladyv1.DeleteResponse{Existed: existed}, nil
 }
 
-// Stats sums the cluster. Counters add cleanly; the eviction-time mean is
-// averaged unweighted, which is close enough when nodes are the same size and is
-// labelled as a mean rather than a percentile for that reason.
+// Stats sums the cluster. Counters add cleanly, and the eviction-time mean is
+// recomputed from the summed numerator and denominator rather than averaged, so a
+// node that evicted twice does not count as much as one that evicted ten thousand
+// times. It is still a mean, not a percentile.
 func (s *server) Stats(ctx context.Context, req *beladyv1.StatsRequest) (*beladyv1.StatsResponse, error) {
 	out := &beladyv1.StatsResponse{NodeId: "gateway"}
-	var evictSum uint64
 
 	for name, client := range s.nodes {
 		st, err := client.Stats(ctx, req)
@@ -159,10 +159,14 @@ func (s *server) Stats(ctx context.Context, req *beladyv1.StatsRequest) (*belady
 		out.BytesCapacity += st.GetBytesCapacity()
 		out.TraceSampled += st.GetTraceSampled()
 		out.TraceDropped += st.GetTraceDropped()
-		evictSum += st.GetEvictNsMean()
+		out.EvictNs += st.GetEvictNs()
+		out.EvictSample += st.GetEvictSample()
 	}
-	if n := uint64(len(s.nodes)); n > 0 {
-		out.EvictNsMean = evictSum / n
+	// Summing the raw pair and dividing once gives the true cluster mean. Averaging
+	// each node's mean, which is what this used to do, weights a node that evicted
+	// twice the same as one that evicted ten thousand times.
+	if out.EvictSample > 0 {
+		out.EvictNsMean = out.EvictNs / out.EvictSample
 	}
 	return out, nil
 }

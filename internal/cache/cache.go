@@ -76,7 +76,15 @@ type Stats struct {
 	// EvictNSMean is the average time the policy spends choosing a victim. It is
 	// the learned policy's budget line: a hit-ratio gain that costs milliseconds
 	// per eviction is not a gain.
+	//
+	// It is a mean over the process lifetime, which makes it the wrong number for a
+	// benchmark to quote: a run that warms a cold cache pays its worst evictions
+	// first and then averages them in forever. EvictNS and EvictSample are the raw
+	// pair, so a caller can difference two snapshots and get the mean over just the
+	// window it cares about. See cmd/loadgen, which does exactly that.
 	EvictNSMean uint64
+	EvictNS     uint64
+	EvictSample uint64
 }
 
 func (s Stats) ObjectHitRatio() float64 { return ratio(s.Hits, s.Hits+s.Misses) }
@@ -91,7 +99,6 @@ func ratio(num, den uint64) float64 {
 
 func (c *Cache) Snapshot() Stats {
 	st := Stats{Policy: c.policy}
-	var evictNS, evictOps uint64
 	for _, s := range c.shards {
 		s.mu.Lock()
 		st.Hits += s.hits
@@ -105,12 +112,12 @@ func (c *Cache) Snapshot() Stats {
 		st.Objects += uint64(len(s.m))
 		st.BytesUsed += uint64(s.used)
 		st.BytesCapacity += uint64(s.capacity)
-		evictNS += s.evictNS
-		evictOps += s.evictSample
+		st.EvictNS += s.evictNS
+		st.EvictSample += s.evictSample
 		s.mu.Unlock()
 	}
-	if evictOps > 0 {
-		st.EvictNSMean = evictNS / evictOps
+	if st.EvictSample > 0 {
+		st.EvictNSMean = st.EvictNS / st.EvictSample
 	}
 	return st
 }
