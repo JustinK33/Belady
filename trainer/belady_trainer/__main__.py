@@ -90,14 +90,17 @@ def cmd_train(args: argparse.Namespace) -> int:
     try:
         result = train_mod.fit(data, boundary_us=boundary_us, seed=args.seed)
     except train_mod.DegenerateLabels as err:
-        median = samples.suggest_boundary_us(trace.key, trace.timestamp_us)
+        # p90 rather than the median: the label is "reused beyond the boundary", so a
+        # boundary at the median leaves half the rows positive on a slow workload and,
+        # on a fast one, rounds to the 1s floor anyway. The usable band is p90 to p99.
+        p90 = samples.suggest_boundary_us(trace.key, trace.timestamp_us, quantile=0.9)
         print(f"error: {err}", file=sys.stderr)
         print(
-            f"hint: the median reuse time in this trace is {median / 1e6:g}s, so try "
-            f"MODEL_BOUNDARY near there. Run `boundary` for the full distribution: a "
-            f"boundary above p99 labels nothing 'beyond', one below p50 labels "
-            f"everything. Whole seconds only, because that is what the registry "
-            f"metadata carries.",
+            f"hint: the p90 reuse time in this trace is {p90 / 1e6:g}s, so try "
+            f"MODEL_BOUNDARY between there and p99. Run `boundary` for the full "
+            f"distribution: a boundary above p99 labels nothing 'beyond', one below "
+            f"p50 labels everything. Whole seconds only, and at least 1s, because "
+            f"that is what the registry metadata carries.",
             file=sys.stderr,
         )
         return 2
