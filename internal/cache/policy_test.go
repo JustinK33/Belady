@@ -3,6 +3,7 @@ package cache
 import (
 	"fmt"
 	"math/rand/v2"
+	"sync/atomic"
 	"testing"
 )
 
@@ -227,12 +228,69 @@ func BenchmarkEvict(b *testing.B) {
 				c.Put(fmt.Sprintf("warm-%d", i), value, 0)
 			}
 
+			// 2048 x 512 B overflows a 512 KiB shard, so the warm loop above already
+			// evicted. EvictNSMean is a lifetime mean and would carry those evictions
+			// into the reported figure, so window it the way loadgen does.
+			before := c.Snapshot()
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; b.Loop(); i++ {
 				c.Admit(fmt.Sprintf("k-%d", i), value)
 			}
-			b.ReportMetric(float64(c.Snapshot().EvictNSMean), "ns/victim")
+			b.ReportMetric(windowedEvictNS(c.Snapshot(), before), "ns/victim")
+		})
+	}
+}
+
+// windowedEvictNS is the mean cost of a victim choice between two snapshots. The
+// benchmarks report this rather than Stats.EvictNSMean so their figure is the same
+// kind of number loadgen prints, which is what makes the two comparable at all.
+func windowedEvictNS(after, before Stats) float64 {
+	samples := after.EvictSample - before.EvictSample
+	if samples == 0 {
+		return 0
+	}
+	return float64(after.EvictNS-before.EvictNS) / float64(samples)
+}
+
+// BenchmarkEvictLiveShape runs the same eviction loop at the shape a cache node
+// actually has: 6 MiB over 32 shards, mean object size as measured live, and
+// concurrent rather than single-goroutine.
+//
+// BenchmarkEvict uses one shard over 512 KiB from one goroutine, which fits in L2
+// and cannot contend. Live, every policy including LRU costs about 9x what
+// BenchmarkEvict reports, so the factor is not the model. This is the part of that
+// factor a benchmark can reproduce: working set and concurrency, without
+// containerisation or a network in the path.
+func BenchmarkEvictLiveShape(b *testing.B) {
+	for name, mk := range policies {
+		b.Run(name, func(b *testing.B) {
+			c, err := New(Config{
+				NewPolicy:     mk,
+				CapacityBytes: 6 << 20,
+				Shards:        32,
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+			// 1456 bytes is the mean object size the loadgen pass observed, so a shard
+			// holds about as many entries here as it does live.
+			value := make([]byte, 1456)
+			for i := range 8192 {
+				c.Put(fmt.Sprintf("warm-%d", i), value, 0)
+			}
+
+			before := c.Snapshot()
+			var seq atomic.Uint64
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.RunParallel(func(pb *testing.PB) {
+				for pb.Next() {
+					c.Admit(fmt.Sprintf("k-%d", seq.Add(1)), value)
+				}
+			})
+			b.StopTimer()
+			b.ReportMetric(windowedEvictNS(c.Snapshot(), before), "ns/victim")
 		})
 	}
 }

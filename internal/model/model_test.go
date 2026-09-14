@@ -300,3 +300,69 @@ func BenchmarkLoad(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkRawVaryingFeatures is BenchmarkRaw with a different feature vector on
+// every evaluation, which is the only thing the live cache ever does: eight
+// candidates per eviction, each with its own recency, size and access history.
+//
+// It exists because the live eviction cost came in far above what BenchmarkRaw
+// predicted, and BenchmarkRaw evaluates one hot vector in a loop. A tree walk is a
+// chain of data-dependent branches, so a fixed vector takes the same path every
+// time and the branch predictor learns all of it. Nothing live is predictable that
+// way, and this measures the difference.
+//
+// The vectors are drawn from the same uniform range as the synthetic thresholds, so
+// each comparison is close to a coin flip. That is the worst case rather than the
+// average one, and the point is the size of the effect, not a number to quote as
+// the model's cost.
+func BenchmarkRawVaryingFeatures(b *testing.B) {
+	const (
+		features = 16
+		vectors  = 512
+	)
+	rng := rand.New(rand.NewPCG(9, 1))
+	text, _ := synth(13, 5, features, rng)
+	m, err := Load(strings.NewReader(text))
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	// One flat backing array, so walking the set costs a sequential read and does
+	// not import a cache-miss effect into a branch measurement.
+	flat := make([]float32, vectors*features)
+	for i := range flat {
+		flat[i] = float32(rng.Float64() * 100)
+	}
+
+	b.Run("hot", func(b *testing.B) {
+		b.ReportAllocs()
+		f := flat[:features]
+		var sink float32
+		for b.Loop() {
+			sink = m.Raw(f)
+		}
+		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)*8, "ns/eviction")
+		keepAlive(b, m, sink)
+	})
+
+	b.Run("varying", func(b *testing.B) {
+		b.ReportAllocs()
+		var sink float32
+		i := 0
+		for b.Loop() {
+			sink = m.Raw(flat[i : i+features])
+			if i += features; i == len(flat) {
+				i = 0
+			}
+		}
+		b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)*8, "ns/eviction")
+		keepAlive(b, m, sink)
+	})
+}
+
+func keepAlive(b *testing.B, m *Model, sink float32) {
+	b.Helper()
+	if sink == 0 && m.NumTrees() == 0 {
+		b.Fatal("unreachable, keeps sink live")
+	}
+}
