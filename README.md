@@ -75,23 +75,24 @@ Topology, the request path, where state lives, and the failure table are in [doc
 
 ## Measured results
 
-Three cache nodes, 32 shards each, 6 MiB per node, Zipfian s=1.1 over 50,000 keys, 400,000 requests at concurrency 64, 4 KiB mean object, 200 µs origin latency, Apple M4.
-Each policy starts cold. The model is a 31-tree LightGBM fit on 217,283 rows sampled from an 8.5 s trace of the same workload, holdout AUC 0.985.
+Three cache nodes in Docker, 32 shards each, 6 MiB per node, Zipfian s=1.1 over 50,000 keys, 400,000 requests at concurrency 64, 1456-byte mean object, flat 200 µs origin latency, Apple M4 with 8 cores.
+Each policy starts cold. The model is a 13-tree LightGBM fit on 80,120 rows sampled from a 13.9 s trace of the same workload, holdout AUC 0.9932, at a 1 s Belady boundary.
 
 | Policy | Object hit | Byte hit | Gap to Belady MIN | Evict cost | p99 | p99.9 |
 | --- | --- | --- | --- | --- | --- | --- |
-| LRU (sampled, 8) | 0.8732 | 0.8645 | -6.96 pts | 815 ns/victim | 3.31 ms | 4.55 ms |
-| Learned (LRB) | **0.8794** | **0.8705** | **-6.33 pts** | 8548 ns/victim | 3.42 ms | 5.76 ms |
+| LRU (sampled, 8) | 0.8636 | 0.8545 | -7.12 pts | 1867 ns/victim | 6.29 ms | 11.88 ms |
+| Learned (LRB) | **0.8702** | **0.8608** | **-6.45 pts** | 8343 ns/victim | 5.20 ms | 12.90 ms |
 
-The learned policy wins on hit ratio and closes 9% of the remaining gap to optimal.
-It also costs 10x more per eviction, and that is the more interesting number.
+The learned policy wins on hit ratio and closes 9.4% of the remaining gap to optimal.
+It also costs 4.5x more per eviction, and that is the more interesting number.
 
-At 0.118 evictions per request, the extra 7.7 µs per eviction works out to roughly 0.9 µs per request, while the 0.62-point hit-ratio gain saves roughly 1.2 µs per request against a 200 µs origin.
-The trade is close to break-even here, which the throughput figures agree with: 51,967 req/s for LRU against 51,211 for the learned policy.
+At 0.111 evictions per request, the extra 6.5 µs per eviction works out to roughly 0.72 µs per request, while the 0.66-point hit-ratio gain saves 1.32 µs per request against a flat 200 µs origin.
+Break-even, near enough: 0.6 µs against a 1.84 ms p50 is 0.03% either way.
+Throughput is not in the table on purpose, because four runs of this configuration spanned 17% on a machine where six processes share eight cores, so it is not measured here even though hit ratio and eviction cost are.
 A learned policy pays off in proportion to how expensive a miss is, so this workload, with a fast local origin, is close to the worst case for it.
-Read the hit-ratio number as the interesting result and the latency number as the price.
+Read the hit-ratio number as the interesting result and the eviction cost as the price.
 
-Numbers are reproducible with `make bench`; see [docs/03-performance.md](docs/03-performance.md) for the full method.
+[docs/03-performance.md](docs/03-performance.md) has the full method, the exact commands, and what does not reproduce even with a fixed seed.
 
 ## What building this taught me
 
@@ -106,13 +107,19 @@ Sampling each inter-access interval at a uniformly random offset instead is what
 That one decision was worth more than any parameter on the booster.
 
 **A hit-ratio win is not a latency win, and the arithmetic is short enough that there is no excuse for skipping it.**
-0.62 points of hit ratio against a 200 µs origin is about 1.2 µs saved per request; 7.7 µs of extra eviction cost at 0.118 evictions per request is about 0.9 µs spent.
+0.66 points of hit ratio against a 200 µs origin is 1.32 µs saved per request; 6.5 µs of extra eviction cost at 0.111 evictions per request is 0.72 µs spent.
 Whether learned eviction is worth it depends almost entirely on what a miss costs, and that is a deployment fact, not a research one.
 
-**Microbenchmarks were off by two orders of magnitude on the thing I most wanted them to predict.**
-In isolation LRB eviction costs 274 ns/victim against LRU's 219 ns, a 55 ns penalty.
-Live, under 64 concurrent clients with a 6 MiB working set per node, the same comparison was 8548 ns against 815 ns.
-The microbenchmark measured a hot model in L1 and a working set that fit in cache; neither is true in the running system, and the gap is still unexplained rather than explained away.
+**A microbenchmark that has no baseline in it cannot be off by a factor, because it is not measuring the same thing.**
+The old headline here was that eviction cost 7x more live than the microbenchmark predicted, and blamed a hot model in L1.
+Then LRU was run through both, and it inflated 9.8x on the same trip from native single-shard bench to containerized three-node cluster.
+Most of the "unexplained" cost was the environment, and none of it needed a model to appear.
+The cache-locality story turned out to be real and small: 1.55x of a 9.8x factor, measured by giving the benchmark the live working set and concurrency.
+
+**Profiling replaced two confident guesses with one surprising answer.**
+The suspects were lock contention under the shard mutex and the pointer chase through map-range sampling, so `Entry` layout and `shard.Sample` were the planned fixes.
+A mutex profile attributes 4.13 ms to the shard lock and every microsecond of it to reads, never to eviction, and a CPU profile splits `Victim` into 74% tree evaluation, 16% feature extraction, and 10% sampling.
+Both planned fixes would have optimized a tenth of the cost.
 
 **Two languages sharing one feature vector is a silent-failure machine.**
 The Go extractor and the Python trainer declare the same fourteen columns in the same order, and nothing at runtime notices if they disagree: the model loads, evaluates, and reads `size_bytes` wherever it was trained to read `recency_ms`.
@@ -177,11 +184,14 @@ The full stack: five services, three cache nodes, Prometheus, Grafana, and the l
 
 ```sh
 cp .env.example .env
-make up      # the cluster, Prometheus and Grafana, then wait for health
-make bench   # replay a Zipfian workload, report hit ratio and tail latency
-make train   # train a model from a captured trace and publish it
-make bench   # again, to see what the model changed
-make test    # unit tests with the race detector
+make up             # the cluster, Prometheus and Grafana, then wait for health
+make bench          # replay a Zipfian workload, report hit ratio and tail latency
+make train-compose  # train from the captured trace and publish it
+make bench          # again, to see what the model changed
+make test           # unit tests with the race detector
 ```
+
+`make train-compose` rather than `make train`, because with `make up` the traces live in a Compose volume the host cannot see.
+Use `make up-dev` if you want them under `./traces`, and see [docs/03-performance.md](docs/03-performance.md) for the exact pass behind the table above.
 
 `make help` lists the rest.

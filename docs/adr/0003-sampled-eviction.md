@@ -7,7 +7,7 @@ Status: accepted.
 An eviction policy has to answer "which resident object should go" when the cache is full.
 The textbook structure is a priority queue over every resident object, which gives the exact minimum of whatever the priority function is.
 
-The learned policy's value proposition is a *fractional* improvement in victim quality: in the measured run, 0.62 points of object hit ratio over sampled LRU.
+The learned policy's value proposition is a *fractional* improvement in victim quality: in the measured run, 0.66 points of object hit ratio over sampled LRU.
 That number is what any implementation cost has to be weighed against.
 
 ## Decision
@@ -19,7 +19,7 @@ No structure is maintained between evictions.
 
 A hit updates the entry in place and touches nothing else.
 With a heap, every hit becomes an O(log n) sift under the shard lock, which is a cost paid on the *common* path to improve the *rare* one.
-The measured workload runs at 0.118 evictions per request ([03-performance.md](../03-performance.md)), so requests outnumber evictions by about eight to one and that trade is the wrong way round.
+The measured workload runs at 0.111 evictions per request ([03-performance.md](../03-performance.md)), so requests outnumber evictions by about nine to one and that trade is the wrong way round.
 
 Eviction cost is bounded and predictable: eight feature extractions and eight model evaluations, independent of cache size.
 The eviction loop allocates nothing, which is only achievable because there is no structure to rebalance.

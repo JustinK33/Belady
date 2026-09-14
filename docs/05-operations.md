@@ -135,11 +135,15 @@ make -C trainer boundary        # or: docker compose ... run --rm trainer bounda
 ```
 
 which prints the p50, p75, p90 and p99 reuse times in the captured trace.
-Start at the median.
+Aim between p90 and p99: a boundary above p99 labels nothing "beyond", one below p50 labels everything, and the useful class balance is nearer the top of that range.
 
 `MODEL_BOUNDARY` must be the same value at the trainer and at every cache node, which is why they read the same variable.
 A mismatch is a refused model with a clear log line, not a silently wrong prediction.
 The floor is 1 s, because `ModelMeta.boundary_seconds` is whole seconds.
+
+**Do not expect the default of `10m` to work.**
+It is a plausible figure for a CDN and it is far outside the reuse times of a benchmark workload: on the one in [03-performance.md](03-performance.md), p50 reuse is 0.2 ms and p99 is 2.79 s, so a 600 s boundary labels 0.0000% of rows "beyond boundary" and the trainer refuses to fit.
+That refusal is the system working, but it means choosing this value is a required step on a fast workload rather than an optional tune.
 
 ### Sample size
 
@@ -184,15 +188,17 @@ A truncated tail, which means the writer died mid-frame, is dropped with a warni
 
 ### What the trainer prints
 
+From `MODEL_BOUNDARY=1s make train-compose` against a 19.2 s trace of the benchmark workload:
+
 ```json
 {
-  "boundary_seconds": 600,
-  "rows": 217283,
-  "positive_rate": 0.0759,
-  "holdout_auc": 0.985,
-  "trees": 31,
-  "dropped_censored": 6856,
-  "top_features": ["recency_ms", "age_ms", "delta_0", "reuse_rate", "size_bytes"]
+  "boundary_seconds": 1.0,
+  "rows": 80182,
+  "positive_rate": 0.0333,
+  "holdout_auc": 0.9948,
+  "trees": 41,
+  "dropped_censored": 716,
+  "top_features": ["reuse_rate", "recency_ms", "accesses", "size_bytes", "age_ms"]
 }
 ```
 
@@ -200,8 +206,8 @@ Read these in this order:
 
 - **`positive_rate`** first. Outside 2% to 98% the trainer refuses to fit and prints the reuse-time quantiles instead. That is the boundary being wrong, not the model.
 - **`holdout_auc`** second, and remember the holdout is split chronologically, not at random. Below about 0.7 the model is not ranking usefully and a boundary closer to the median is the first thing to try.
-- **`trees`** third, because it is the inference budget. Early stopping usually lands around 30. Much more than 35 and eviction goes over its microsecond budget; see [03-performance.md](03-performance.md).
-- **`dropped_censored`** last, as a sanity check. A large fraction means the trace is too short relative to the boundary.
+- **`trees`** third, because it is the inference budget, and it is an outcome of early stopping rather than a setting. The 41 above is already over budget: `internal/model`'s own sweep puts 25 trees at roughly the full microsecond for eight candidates, so this model buys its AUC with latency. Two fits of the same workload minutes apart gave 13 trees and 41, so read this field every time rather than assuming it holds. See [03-performance.md](03-performance.md).
+- **`dropped_censored`** last, as a sanity check. A large fraction means the trace is too short relative to the boundary: 716 of 80,898 records here, against a 1 s boundary on a 19.2 s trace.
 
 ### Confirming the rollout
 
@@ -248,7 +254,7 @@ Each process uses its own `prometheus.Registry` rather than the default one, so 
 | Symptom | Cause |
 | --- | --- |
 | `no .trace segments ... .partial file(s) are still open` | No segment has rotated yet. Turn `TRACE_SEGMENT_BYTES` and `TRACE_SEGMENT_MAX_AGE` down, or stop the node cleanly. |
-| Trainer exits 2 with "too one-sided to rank candidates with" | The boundary is outside the workload's reuse times. Run `boundary` and use a value near the median. |
+| Trainer exits 2 with "too one-sided to rank candidates with" | The boundary is outside the workload's reuse times. Run `boundary` and pick a value between p90 and p99, subject to the 1 s floor. |
 | `belady_model_load_failures_total` climbing | Read the node log. Almost always `MODEL_BOUNDARY` differing between trainer and node. |
 | `Stats.policy` is `"mixed"` | Nodes are running different policies. Any hit-ratio comparison across the cluster is meaningless until that is fixed. |
 | Every `Put` returns `admitted: false` | The object is larger than one shard's budget. Fewer shards or more capacity. |

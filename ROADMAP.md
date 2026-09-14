@@ -3,13 +3,13 @@
 What is built, what is next, and what has been deliberately left out.
 Kept in the repo rather than in an issue tracker so the plan and the code go stale together, which at least makes the drift visible.
 
-Last reviewed 2026-09-10.
+Last reviewed 2026-09-14.
 
 ## Where the project stands
 
 The end-to-end loop works and is measured.
 The cluster serves traffic, samples its own access traces, trains a model from them, publishes it, and all three cache nodes install it without a restart.
-The learned policy beats sampled LRU on hit ratio by 0.62 points and costs roughly ten times more per eviction; the numbers and the break-even arithmetic are in the [README](README.md).
+The learned policy beats sampled LRU on hit ratio by 0.66 points and costs 4.5 times more per eviction; the numbers and the break-even arithmetic are in the [README](README.md), and the method behind them is in [docs/03-performance.md](docs/03-performance.md).
 
 | Step | What it delivered | State |
 | --- | --- | --- |
@@ -27,7 +27,7 @@ The learned policy beats sampled LRU on hit ratio by 0.62 points and costs rough
 | 13 | Docker images, Compose stack, Prometheus and Grafana | done |
 | 14 | GitHub Actions, Dependabot, security and contributor docs | done |
 | 15 | `docs/` prose, nine ADRs, the architecture diagrams | done |
-| 16 | Final measured pass, numbers into the docs | next |
+| 16 | Final measured pass, numbers into the docs | done |
 | 17 | Usable mode: REST surface, per-entry TTL, optional origin, two-container stack | done |
 
 Steps 13 and 14 were written without a running Docker daemon and without a push to GitHub, so they sat at "done, unverified" until the first real Actions run.
@@ -55,30 +55,44 @@ Writing `docs/06-security.md` found a real bug: `Registry.GetModel` passed an un
 Fixed in `a8db709` with `validVersion` applied to both the publish and read paths, and a regression test.
 Documentation that only restates the code cannot find anything; documentation that has to state the invariant out loud can.
 
-## Next
+## Step 16, as built
 
-### Step 16: the final measured pass
+The confirmation run happened, and the interesting part was that the documented commands did not reproduce the documented configuration.
 
-Mostly landed already: `docs/03-performance.md` carries a full measured pass with the method spelled out, and the microbenchmark figures in it reproduce within run-to-run noise.
-What is left is a confirmation run from a clean state, and updating the README headline if the numbers move.
+Five separate defects in the reproduce block, each of which would have sent a reader somewhere other than the recorded numbers.
+The block said `make up && make bench` while the prose above it recorded the pass as native rather than containerized.
+Four load-bearing parameters differed from the committed defaults and were set by no documented command: 400,000 requests against `REQUESTS=200000`, 50,000 keys against `KEYSPACE=100000`, 6 MiB per node against `CACHE_CAPACITY=64MiB`, and 200 µs origin latency against `ORIGIN_LATENCY=2ms`.
+`MODEL_BOUNDARY` was a fifth unrecorded parameter, and the documented default of `10m` cannot fit this workload at all.
+`make train` after `make up` cannot see any traces, because they live in a Compose volume, so the step is `make train-compose`.
+And after choosing a boundary the cache nodes must be recreated, or they refuse the new model on a boundary mismatch and the run silently measures the fallback policy instead of the learned one.
+
+Everything in the results table was re-measured against a pinned, executed block, and the numbers moved: 0.8702 object hit for LRB against 0.8636 for LRU, and 8343 ns/victim against 1867.
+Throughput was dropped from the table rather than restated, because four runs of the same configuration spanned 17% on a machine where six containers share eight cores, while hit ratio held to 4 basis points and eviction cost to 4%.
+Reporting a number that noisy next to numbers that stable would have implied all of them were measurements.
 
 ## Known open items
 
 These are real, they are not blocked on anything, and they are ordered by how much they bother me.
 
-**The live eviction penalty is about 7x worse than the microbenchmark predicts, and that remainder is unexplained.**
-This item used to read "two orders of magnitude, unexplained" against microbenchmark figures of 274 ns/victim for LRB and 219 ns for LRU.
-Both were superseded by the measured pass, which reproduces at 195 ns for LRU and 254 to 261 ns for LRB, and `docs/03-performance.md` explains most of the apparent gap: `BenchmarkEvict/lrb` installs a synthetic single-tree, 25-leaf model, so reading its result as a prediction for a 31-tree fit was the mistake.
-Corrected, the prediction is ~1.2 µs/victim against 8.5 µs measured live, so the real discrepancy is about 7x rather than 30x.
+**Tree evaluation is 74% of eviction cost, and nothing has been done about it yet.**
+This item used to read "the live eviction penalty is about 7x worse than the microbenchmark predicts, and that remainder is unexplained".
+It is now accounted for to within about 1.4x, and the write-up is under [The gap between the microbenchmark and the live number](docs/03-performance.md#the-gap-between-the-microbenchmark-and-the-live-number).
+The short version is that most of the gap was never about the model: LRU inflates 9.8x on the same trip from a native single-shard benchmark to a containerized three-node cluster, and the original comparison never ran the baseline through both ends.
 
-The plausible causes are a hot model and a cache-resident working set in the microbenchmark against a 6 MiB working set of pointer-chased map entries live, plus `evict_ns_mean` including time the goroutine spent descheduled under contention.
-Neither has been demonstrated, and this still needs a CPU profile of a cache node under load.
-`/debug/pprof` is on every service's debug port, so the data is one command away; the work is doing it and reading it.
+Both of the fixes this item used to imply are now ruled out by measurement.
+Descheduling under the shard lock is falsified: with contention profiling on for a full run, the mutex profile attributes 4.13 ms to the shard lock and all of it to reads, with `insert` and `evictOne` absent, the block profile attributes nothing to the `cache` package, and a CPU profile puts `lrb.Victim` at the same on-CPU time the counter reports as wall time.
+Map-range sampling and the `Entry` layout are 10% and 16% of `Victim` respectively, so optimizing either would move a tenth of the cost.
 
-**The Belady boundary must be at least one second.**
+What is left is the 74%: `model.Raw` over 13 trees.
+The lever with the most behind it is evaluating all eight candidates in one pass instead of eight, because a fixed feature vector is 1.35x faster than a varying one purely on branch prediction (`BenchmarkRawVaryingFeatures`), and batching is what would let the predictor see one walk instead of eight.
+That is a hot-path change and is deliberately not in this pass.
+
+**The Belady boundary must be at least one second, and the documented default is unusable.**
 `ModelMeta.boundary_seconds` is whole seconds, the registry rejects zero, and a cache node refuses any model whose boundary disagrees with its own `MODEL_BOUNDARY`.
-On a workload whose median reuse time is milliseconds, the smallest legal boundary is already well above the median, which is workable but not obviously right.
-Either the field becomes milliseconds or the operations doc explains why second granularity is the sensible floor.
+The default is `10m`, and on the benchmark workload it labels 0.0000% of rows "beyond boundary", so the trainer correctly refuses to fit: p50 reuse time is 0.0002 s, p90 is 0.0351 s, and p99 is 2.79 s.
+The smallest legal boundary, 1 s, sits between p90 and p99 and is what the measured pass uses, which works but is a coincidence rather than a design.
+`git log -S` on the labelling check confirms it predates the earlier recorded pass, so that pass cannot have used the documented default either, and the parameter it did use was never written down.
+Either the field becomes milliseconds or the default changes to something a real trace can satisfy; leaving a default that always fails is the one option that is clearly wrong.
 
 **The integration workflow's training phase is still the most likely thing to be flaky.**
 It trains a model from a trace captured seconds earlier, so if the smoke run is too short or too fast the labels come out one-sided and the trainer refuses to fit, which is the correct behaviour and a red build.
@@ -96,8 +110,9 @@ That works on macOS, where the file sharing layer papers over ownership, and wil
 
 ## Later, in rough priority order
 
-**Profile and close the eviction gap.**
-The most interesting engineering question the project has produced, and the answer changes what the README claims.
+**Score all eight candidates in one batched pass.**
+The profile says tree evaluation is 74% of eviction cost, so this is the only change with a factor in it rather than a percent.
+It is a hot-path change to `internal/model` and `internal/cache/lrb.go`, and the guard is that eviction must stay at zero allocations.
 
 **A hit-ratio-versus-cost sweep instead of a single data point.**
 The learned policy's value depends almost entirely on what a miss costs, so the honest chart is hit ratio and throughput against origin latency, from tens of microseconds to tens of milliseconds.
@@ -117,8 +132,8 @@ That rule is the hard part and it needs shadow scoring, not a cron entry.
 
 **A purpose-built binary protocol on the hot path.**
 Named as the rejected alternative in [ADR 0002](docs/adr/0002-grpc-for-internal-apis.md), because it is the option that could genuinely beat gRPC rather than lose to it: RESP or something memcached-shaped, length-prefixed framing over raw TCP, no HTTP/2 and no protobuf on `Cache.Get`.
-It is below the profiling work on purpose.
-Optimising a transport before knowing where the eviction microseconds actually go is the wrong order, and the honest version of this item is a measurement first: what fraction of per-request time is framing and encoding?
+It is below the batched-scoring work on purpose.
+Eviction costs 8.3 µs against a measured p50 of 1.84 ms, so the transport is a larger share of a request than eviction is, but nothing has measured which part of it: the honest version of this item is that measurement first, so what fraction of per-request time is framing and encoding?
 Note also that `loadgen` is a gRPC client, so any change here has to keep the measurement path comparable or restate every number in `docs/03-performance.md`.
 
 **mTLS between services.**

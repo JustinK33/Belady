@@ -41,6 +41,6 @@ Rejected because the cgo call overhead is comparable to the entire eviction budg
 
 **ONNX Runtime.**
 More portable and would support model types this evaluator does not.
-Rejected for the same call-overhead reason, plus a large native dependency in every cache node image for a workload that is 31 trees deep.
+Rejected for the same call-overhead reason, plus a large native dependency in every cache node image for a workload whose fitted models run to a few dozen shallow trees.
 
 Both are listed as out of scope in the roadmap rather than as later work, because the sub-microsecond budget is the interesting constraint of this project and delegating inference removes the thing being studied.

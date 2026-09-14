@@ -64,110 +64,230 @@ Latency buckets are `ExponentialBuckets(50e-6, 2, 19)`, which is 50 µs doubling
 ## Microbenchmarks
 
 Run with `make bench-micro`, which is `go test ./internal/... -run '^$' -bench . -benchmem`.
-Apple M4, `darwin/arm64`, 2026-09-09.
+Apple M4, `darwin/arm64`, 2026-09-14, with no containers running.
 
 | Benchmark | Result | Allocations |
 | --- | --- | --- |
-| `cache/GetHit` (parallel, 256 shards) | 22.77 ns/op | 0 |
-| `trace/RingPush` | 13.44 ns/op | 0 |
-| `cache/Evict/s3fifo` | 79 ns/victim | 0 in the policy |
-| `cache/Evict/lfu` | 173 ns/victim | 0 in the policy |
-| `cache/Evict/lru` | 195 ns/victim | 0 in the policy |
-| `cache/Evict/lrb` | 254 ns/victim | 0 in the policy |
-| `cache/LRBVictim` | 170.2 ns/op | 0 |
-| `hashring/Pick` (parallel, 8 nodes, 256 replicas) | 341.5 ns/op | 0 |
-| `model/Raw` 50 trees, 32 leaves | 183.2 ns/op, 1465 ns/eviction | 0 |
-| `model/Raw` 100 trees, 64 leaves | 488.3 ns/op, 3906 ns/eviction | 0 |
-| `model/Raw` 200 trees, 64 leaves | 1014 ns/op, 8111 ns/eviction | 0 |
-| `model/Load` 100 trees | 1.32 ms/op, 253 MB/s | 2346 |
-| `belady/MINHitRatio` 200k requests, 100k keys, 10k capacity | 11.8 ms/op | 208k |
+| `cache/GetHit` (parallel, 256 shards) | 21.53 ns/op | 0 |
+| `trace/RingPush` | 13.67 ns/op | 0 |
+| `cache/Evict/s3fifo` | 79.57 ns/victim | 0 in the policy |
+| `cache/Evict/lfu` | 181.0 ns/victim | 0 in the policy |
+| `cache/Evict/lru` | 191.3 ns/victim | 0 in the policy |
+| `cache/Evict/lrb` | 256.0 ns/victim | 0 in the policy |
+| `cache/EvictLiveShape/s3fifo` | 236.4 ns/victim | 0 in the policy |
+| `cache/EvictLiveShape/lru` | 296.6 ns/victim | 0 in the policy |
+| `cache/EvictLiveShape/lfu` | 307.2 ns/victim | 0 in the policy |
+| `cache/EvictLiveShape/lrb` | 487.1 ns/victim | 0 in the policy |
+| `cache/LRBVictim` | 176.6 ns/op | 0 |
+| `hashring/Pick` (parallel, 8 nodes, 256 replicas) | 341.1 ns/op | 0 |
+| `model/Raw` 50 trees, 32 leaves | 192.3 ns/op, 1538 ns/eviction | 0 |
+| `model/Raw` 100 trees, 64 leaves | 466.2 ns/op, 3730 ns/eviction | 0 |
+| `model/Raw` 200 trees, 64 leaves | 1038 ns/op, 8305 ns/eviction | 0 |
+| `model/RawVaryingFeatures` 13 trees, one hot vector | 44.61 ns/op, 356.8 ns/eviction | 0 |
+| `model/RawVaryingFeatures` 13 trees, 512 vectors | 60.07 ns/op, 480.6 ns/eviction | 0 |
+| `model/Load` 100 trees | 1.26 ms/op, 263 MB/s | 2346 |
+| `belady/MINHitRatio` 200k requests, 100k keys, 10k capacity | 13.8 ms/op | 208k |
 
 The 3 allocations per op reported by `Evict/*` are the benchmark's own `fmt.Sprintf` and the value slice, not the policy.
 `model/Load` allocates freely on purpose: it runs off the request path, once per model version, and 1.3 ms to parse a 100-tree dump is not a number worth optimising.
 
-`Evict/*` reports the store's own `evict_ns_mean` counter, which times only `policy.Victim` plus one clock read.
-It is the same counter the running cluster exports, which is what makes the microbenchmark and the live number directly comparable.
+`Evict/*` reports the store's own eviction timer, which measures only `policy.Victim` plus one clock read.
+It is the same counter the running cluster exports, and both now report it the same way: as a mean over the measured window rather than over the process lifetime.
+That last part had to be fixed before the two numbers could be compared at all, and it is the smaller of the two reasons they used to disagree.
+
+### Two shapes, because one of them was hiding a factor of 1.55
+
+`Evict/*` uses one shard over 512 KiB from a single goroutine.
+That fits in L2, cannot contend, and is the right shape for the question it was written for: does the eviction path allocate, and does each policy pick the victim it claims to.
+
+`EvictLiveShape/*` is the same loop at the shape a cache node actually runs: 6 MiB over 32 shards, 1456-byte objects as measured live, driven by `RunParallel`.
+LRU costs 191.3 ns/victim at the first shape and 296.6 ns/victim at the second, for identical work.
+That 1.55x is working set and concurrency, and it is charged to every policy, which is exactly why looking only at the learned policy's number could not find it.
 
 ### Reading the model numbers
 
 The `ns/eviction` column on `model/Raw` is the per-evaluation cost times 8, the default sample size.
 A 50-tree, 32-leaf model therefore costs about 1.5 µs per eviction in evaluation alone, which is over the budget.
-The model this project actually trains is 31 trees at `num_leaves=32`, and scaling linearly on tree count puts it at roughly 113 ns per candidate and **about 0.9 µs per eviction**.
 
-So the sub-microsecond budget holds for the model that gets trained, with almost no headroom, and it is exceeded somewhere above 35 trees.
+`RawVaryingFeatures` is the same measurement with a different feature vector per call, and it is the honest one.
+A tree walk is a chain of data-dependent branches, so evaluating one hot vector in a loop lets the branch predictor learn the entire walk.
+Nothing live is predictable that way: eight candidates per eviction, each with its own recency, size and access history.
+The difference is 1.35x, and every `model/Raw` row above understates its model by about that much.
+
+The fit measured in the pass below is 13 trees at `num_leaves=32`, which costs **about 0.5 µs per eviction** in evaluation with varying features.
+So the sub-microsecond budget holds for the model that gets trained, with roughly half the budget left, and it is exceeded somewhere above 25 trees.
 That is a real constraint on the trainer, not a theoretical one: `MAX_ROUNDS` is 300 with early stopping at 25, and the only reason the fitted model is small is that early stopping fires.
 A workload that needed 200 trees would need either a smaller `CACHE_SAMPLE_SIZE` or a different story about the budget.
 
 ## Measured cluster numbers
 
-Most recent full pass, on the configuration recorded here.
-The pass in [ROADMAP.md](../ROADMAP.md) step 16 will re-run this from a clean state.
+The step 16 confirmation pass, run from a torn-down state on 2026-09-14.
+It replaces an earlier pass whose configuration was not fully recorded; see [what the earlier pass could not have been](#what-the-earlier-pass-could-not-have-been).
 
 **Setup.**
-Three cache nodes, 32 shards each, 6 MiB per node.
+Three cache nodes in Docker, 32 shards each, 6 MiB per node.
 Zipfian `s = 1.1` over 50,000 keys, 400,000 requests at concurrency 64, 20,000-request warmup excluded from the numbers.
-Pareto object sizes with a 4 KiB mean, 200 µs origin latency.
-Apple M4, native, not in Docker.
-Each policy starts cold.
-The model is a 31-tree LightGBM fit on 217,283 rows sampled from an 8.5 s trace of the same workload, holdout AUC 0.985.
+Pareto object sizes, `alpha = 1.5` from a 512-byte minimum, which came out at a **1456-byte observed mean**.
+Origin latency a flat 200 µs with jitter off, so the break-even arithmetic below uses an exact miss cost.
+Apple M4, 8 cores, everything containerised including the gateway and origin, `loadgen` native on the host.
+Each policy starts cold, from `--force-recreate` on the three nodes.
+The model is a 13-tree LightGBM fit on 80,120 rows sampled from a 13.9 s trace of the same workload, holdout AUC 0.9932, positive rate 0.0277, at a **1 s boundary**.
 
-| Policy | Object hit | Byte hit | Gap to Belady MIN | Evict cost | p99 | p99.9 | Throughput |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| LRU (sampled, 8) | 0.8732 | 0.8645 | -6.96 pts | 815 ns/victim | 3.31 ms | 4.55 ms | 51,967 req/s |
-| Learned (LRB) | 0.8794 | 0.8705 | -6.33 pts | 8548 ns/victim | 3.42 ms | 5.76 ms | 51,211 req/s |
+| Policy | Object hit | Byte hit | Gap to Belady MIN | Evict cost | p99 | p99.9 |
+| --- | --- | --- | --- | --- | --- | --- |
+| LRU (sampled, 8) | 0.8636 | 0.8545 | -7.12 pts | 1867 ns/victim | 6.29 ms | 11.88 ms |
+| Learned (LRB, 13 trees) | 0.8702 | 0.8608 | -6.45 pts | 8343 ns/victim | 5.20 ms | 12.90 ms |
+| LRB with no model loaded | 0.8632 | 0.8546 | -7.16 pts | 1803 ns/victim | 6.03 ms | 16.29 ms |
 
-The learned policy wins on hit ratio by 0.62 points and closes about 9% of the gap that remained to optimal.
-It costs roughly 10x more per eviction.
+The learned policy wins on hit ratio by 0.66 points and closes about 9.4% of the gap that remained to optimal.
+It costs 4.5x more per eviction.
+
+The third row is the control: `lrb` configured with no model falls back to recency, and it lands on LRU's numbers to within 4 basis points.
+A run labelled "lrb" that quietly never loaded a model would look exactly like that, which is why the row is here.
+
+**Throughput is deliberately absent from that table.**
+Four runs of the same configuration on this machine reported 26,511, 28,670, 30,343 and 31,110 req/s, a 17% spread, because three cache nodes plus a gateway, an origin and `loadgen` are competing for eight cores.
+Hit ratio over the same four runs varied by 4 basis points and eviction cost by 4%, so those two are measured and throughput is not.
+Deciding the throughput comparison needs a quieter machine or a longer run, and it is the one number this pass does not settle.
 
 ### The arithmetic that makes the win small
 
-At 0.118 evictions per request, an extra 7.7 µs per eviction is about **0.9 µs per request spent**.
-0.62 points of hit ratio against a 200 µs origin is about **1.2 µs per request saved**.
+At 0.111 evictions per request, an extra 6.5 µs per eviction is about **0.72 µs per request spent**.
+0.66 points of hit ratio against a flat 200 µs origin is **1.32 µs per request saved**.
 
-Close to break-even, which the throughput figures agree with: 51,967 req/s against 51,211, a 1.5% loss.
+So the learned policy is about 0.6 µs per request ahead here, against a p50 of 1.84 ms.
+That is 0.03% of the latency a client sees, and far inside the run-to-run spread above.
+Call it break-even and do not claim a direction.
 
 This is the honest headline.
 A learned policy pays off in proportion to what a miss costs, and this workload has a very fast local origin, which is close to the worst case for it.
-Against a 20 ms origin the same 0.62 points would save 124 µs per request and the eviction cost would be noise.
+Against a 20 ms origin the same 0.66 points would save 132 µs per request and the eviction cost would be noise.
 Turning that observation into a curve, hit ratio and throughput against origin latency from tens of microseconds to tens of milliseconds, is the most useful measurement this project does not yet have.
 
 ### The gap between the microbenchmark and the live number
 
-The ROADMAP has carried this as "two orders of magnitude, unexplained".
-Part of it is now explained, and the explanation is that the microbenchmark was not measuring the same model.
+This started as "two orders of magnitude, unexplained", became 7x after the microbenchmark's model size was corrected, and is now accounted for to within about 1.4x.
 
-`BenchmarkEvict/lrb` installs a synthetic **single-tree, 25-leaf** staircase over one feature.
-It exists to prove the learned path allocates nothing and picks the victim the model says, and it is fine for that.
-It is not a model-size measurement, and reading 254 ns/victim as a prediction for a 31-tree fit was the mistake.
+The reason it stayed open so long is worth more than the number.
+Every attempt to explain it looked at the learned policy's eviction cost and asked what the model was doing.
+The answer was that most of the gap was never about the model: **LRU's eviction cost inflates by the same factor between the two environments**, and nobody had compared the baselines.
 
-Corrected arithmetic, all from the table above:
+Four factors, each measured rather than argued:
+
+| Factor | Evidence | Size |
+| --- | --- | --- |
+| Container, three nodes, eight shared cores | `EvictLiveShape/lru` 296.6 ns/victim native, LRU 1867 ns/victim live, identical work | 6.3x |
+| Working set and concurrency | `Evict/lru` 191.3 ns/victim, `EvictLiveShape/lru` 296.6 ns/victim | 1.55x |
+| Branch predictability in the tree walk | `RawVaryingFeatures` hot 44.61 ns/op, varying 60.07 ns/op | 1.35x |
+| Windowing the counter instead of reading a lifetime mean | `Evict/lru` 195 → 191.3 ns/victim | 1.02x |
+
+Rebuilt prediction for the model this pass actually trained, all from the microbenchmark table:
 
 | Component | Estimate |
 | --- | --- |
-| Sampling 8 candidates, LRU baseline | 195 ns |
-| Feature extraction, 8 candidates | ~60 ns, from the 254-195 difference less one tree |
-| Model evaluation, 31 trees, 8 candidates | ~908 ns |
-| **Predicted** | **~1.2 µs/victim** |
-| **Measured live** | **8.5 µs/victim** |
+| Sampling 8 candidates at live shape, LRU baseline | 297 ns |
+| Feature extraction plus one tree, 8 candidates | 191 ns, from the `EvictLiveShape` lrb-lru difference |
+| Model evaluation, remaining 12 of 13 trees, varying features | 444 ns |
+| **Predicted, native** | **~930 ns/victim** |
+| **Predicted, live**, applying the 6.3x environment factor | **~5.9 µs/victim** |
+| **Measured live** | **8.3 µs/victim** |
 
-So the real discrepancy is about 7x, not 30x.
-What remains is still unexplained rather than explained away.
-The plausible causes are that the microbenchmark holds a hot model and a working set that both fit in cache while the live node has a 6 MiB working set of pointer-chased map entries, and that `evict_ns_mean` under contention includes time the goroutine spent descheduled.
-Neither has been demonstrated.
+A 1.4x residual, against 7x before.
+It is not decomposed further, and the honest reading is that the 6.3x environment factor was derived from LRU, whose cost is dominated by memory latency, while model evaluation is compute and branch bound.
+There is no reason those two should scale identically under CPU oversubscription, and 1.4x is about the size of that mismatch.
 
-**This needs a CPU profile of a cache node under load before anything here claims to explain the number.**
-`/debug/pprof` is on every service's debug port, so the data is one command away; the work is doing it and reading it.
+### What was ruled out
+
+`evict_ns_mean` brackets `policy.Victim` while the shard mutex is already held, so time the goroutine spent descheduled would be charged to the policy.
+That was the leading hypothesis and it is **wrong**.
+
+`PROFILE_CONTENTION=true` arms the runtime's mutex and block samplers, and over a full 400,000-request run against the learned policy:
+
+- The mutex profile attributes **4.13 ms** to the shard lock, all of it on `shard.get`, the read path. `shard.insert` and `evictOne` do not appear at all.
+- The block profile attributes **nothing** to the `cache` package. It is entirely `selectgo` and `chanrecv` in the trace recorder and in gRPC, which is goroutines waiting for work rather than contending.
+- A 20-second CPU profile puts `lrb.Victim` at 0.19 s cumulative on-CPU, which matches the wall time the counter reports for the same interval to within sampling error. If descheduling were the story, wall time would exceed on-CPU time.
+
+The same CPU profile splits `Victim` cleanly, and the split is what the rebuilt prediction above is checked against:
+
+| Inside `lrb.Victim` | Share of on-CPU time |
+| --- | --- |
+| `model.Raw`, the tree walk | 74% |
+| `shard.Sample`, the map range and pointer chase | 10% |
+| `features.Extract` and `Entry.Deltas` | 16% |
+
+Sampling is 10% of the learned policy's eviction cost.
+The `Entry` layout and the map-range sampling in `shard.Sample` were the obvious things to optimise and they are not where the time is.
 
 The containerised CI run measured 11,781 ns/victim on GitHub's shared runners, which is consistent with the live figure plus virtualisation overhead and is not an independent data point.
+
+### What the earlier pass could not have been
+
+The pass this section replaces recorded "Apple M4, native, not in Docker" and a 31-tree model at holdout AUC 0.985, fit on 217,283 rows from an 8.5 s trace.
+It did not record `MODEL_BOUNDARY`, and it cannot have been the documented default of `10m`.
+
+Nothing in an 8.5-second trace is reused more than 600 seconds later, so at a 600 s boundary every row is labelled "within boundary" and the trainer refuses to fit:
+
+```
+error: 0.0000% of rows are labelled 'beyond boundary', which is too one-sided to
+rank candidates with. The 600s boundary sits outside the reuse times in this trace
+```
+
+That check has been in `trainer/belady_trainer/train.py` since it was written, before the earlier pass was recorded, so the earlier pass was run at some other boundary that was never written down.
+The pass above uses `MODEL_BOUNDARY=1s`, which the reproduce block pins, and 1 s is close to forced: the reuse-time distribution on this workload is p50 0.2 ms, p90 35 ms, p99 2.79 s, so a boundary has to sit in the p90-p99 range to give a usable class balance, and the registry metadata carries whole seconds.
+The resulting positive rate is 0.0277 against a 0.02 floor, which is not much margin.
+
+### What is not reproducible even with a fixed seed
+
+`loadgen` takes `SEED` and replays a deterministic key sequence, so hit ratios repeat to a few basis points.
+The model does not.
+
+Trace sampling is one key in sixteen **by key hash**, so which keys land in the sample depends on the hash and the sampled fraction swings between runs.
+The tree count is an outcome of early stopping, not a setting.
+
+Two fits of this same workload, minutes apart at the same boundary, came out at 13 trees on 80,120 rows at 0.9932 AUC and **41 trees on 80,182 rows at 0.9948**.
+The row counts agree to 0.08% and the tree count varies by 3x, which is early stopping responding to which keys the hash happened to sample.
+That matters because trees are the inference budget: the second model would cost roughly three times as much per eviction for 16 basis points of AUC.
+So the 13-tree model is a property of one training run, and the LRB eviction cost in the table above moves with it.
+Expect the shape of the result to repeat and the third decimal place not to.
 
 ## Reproducing any of this
 
 ```sh
-make bench-micro                      # the microbenchmark table
-make up && make bench                 # the cluster numbers, LRB with no model yet
-make train && make bench              # again, with a model installed
-CACHE_POLICY=lru make up && make bench  # the baseline
+make bench-micro                        # the microbenchmark table
+
+# The cluster numbers. Every value here is load-bearing and none of them are the
+# committed defaults, which is why they are spelled out rather than left implicit.
+export CACHE_CAPACITY=6MiB CACHE_SHARDS=32 MODEL_BOUNDARY=1s
+export ORIGIN_LATENCY=200us ORIGIN_JITTER=0
+export REQUESTS=400000 KEYSPACE=50000        # CONCURRENCY, WARMUP, ZIPF_S, SEED are defaults
+export ORIGIN_MIN_SIZE=512 ORIGIN_MAX_SIZE=65536 ORIGIN_SIZE_ALPHA=1.5
+
+docker compose -f deploy/compose.yaml down -v   # clean state: the models volume too
+CACHE_POLICY=lrb make up && make bench          # LRB with no model yet, and this captures the trace
+
+# make train reads ../traces on the host, which make up does not populate: traces
+# live in a Compose volume. Use the containerised trainer, or bring the stack up
+# with make up-dev, which bind-mounts them.
+make train-compose
+docker compose -f deploy/compose.yaml up -d --force-recreate cachenode-0 cachenode-1 cachenode-2
+make bench                                      # LRB with the model installed
+
+CACHE_POLICY=lru make up && make bench          # the baseline
 ```
+
+The recreate step is not optional.
+Nodes validate a model's `boundary_seconds` against their own `MODEL_BOUNDARY` and refuse a mismatch, so nodes started before the boundary was chosen will not accept the model:
+
+```
+ERROR refused model version=20260914T054948Z
+  err="trained against a 1s Belady boundary, this node is configured for 10m0s"
+```
+
+`make train-compose` still reports success, because publishing succeeded, and the next `make bench` then measures the fallback policy under the label `lrb`.
+The third row of the table above is what that looks like, and the only way to notice it in the moment is the node logs.
+
+For the contention profiles, add `PROFILE_CONTENTION=true` before `make up` and read `/debug/pprof/mutex` and `/debug/pprof/block` off port 9201.
+Do not take throughput or latency from a run with it on.
 
 `loadgen` prints the offline Belady MIN for the same trace it just replayed, so the gap column comes out of the same run rather than being computed separately.
 Set `MIN_OBJECT_HIT` and `MAX_P99` and it exits non-zero when a run misses either, which is how the integration workflow turns a policy or hot-path regression into a red build rather than a number nobody read.
