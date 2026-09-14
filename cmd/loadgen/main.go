@@ -226,10 +226,22 @@ type serverDelta struct {
 	objects       uint64
 	bytesUsed     uint64
 	bytesCapacity uint64
-	evictNS       uint64
+
+	// evictNS is the mean cost of a victim choice over the measured window, not the
+	// server's lifetime mean. The lifetime mean carries every warmup eviction
+	// forever, and warmup is where a cold cache pays its worst ones, so quoting it
+	// in a benchmark overstates the policy's cost by an amount that depends on how
+	// long the warmup was.
+	evictNS uint64
 }
 
 func delta(before, after *beladyv1.StatsResponse) serverDelta {
+	// Recomputed from the summed pair rather than differenced, because a mean is not
+	// a counter: after-minus-before on evict_ns_mean is meaningless.
+	var evictNS uint64
+	if samples := after.GetEvictSample() - before.GetEvictSample(); samples > 0 {
+		evictNS = (after.GetEvictNs() - before.GetEvictNs()) / samples
+	}
 	return serverDelta{
 		policy:        after.GetPolicy(),
 		modelVersion:  after.GetModelVersion(),
@@ -242,7 +254,7 @@ func delta(before, after *beladyv1.StatsResponse) serverDelta {
 		objects:       after.GetObjects(),
 		bytesUsed:     after.GetBytesUsed(),
 		bytesCapacity: after.GetBytesCapacity(),
-		evictNS:       after.GetEvictNsMean(),
+		evictNS:       evictNS,
 	}
 }
 
@@ -264,7 +276,7 @@ func report(opts options, trace []string, res *results, sd serverDelta, elapsed 
 	// server's own count, routing or stats aggregation is broken, not the policy.
 	row("client view", fmt.Sprintf("%.4f served from cache", ratio(uint64(res.fromCache), uint64(res.served))))
 	row("evictions", fmt.Sprintf("%d, %d rejected", sd.evictions, sd.rejections))
-	row("evict cost", fmt.Sprintf("%d ns/victim (includes one clock read)", sd.evictNS))
+	row("evict cost", fmt.Sprintf("%d ns/victim over the window (includes one clock read)", sd.evictNS))
 
 	// The optimum is scored on the same trace the server just replayed, at a
 	// capacity converted from bytes using the mean object size actually observed.
