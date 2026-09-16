@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from belady_trainer import columns, samples, train
-from belady_trainer.__main__ import parse_duration_us
+from belady_trainer.__main__ import parse_duration_us, whole_seconds
 
 SECOND = 1_000_000
 BOUNDARY = SECOND
@@ -107,3 +107,23 @@ def test_go_style_durations(text, want_us):
 def test_bad_durations_are_refused(text):
     with pytest.raises(ValueError):
         parse_duration_us(text)
+
+
+@pytest.mark.parametrize(
+    ("boundary_us", "want_seconds"),
+    [(SECOND, 1), (30 * SECOND, 30), (600 * SECOND, 600)],
+)
+def test_a_whole_second_boundary_survives_the_metadata(boundary_us, want_seconds):
+    assert whole_seconds(boundary_us) == want_seconds
+
+
+@pytest.mark.parametrize("boundary_us", [500_000, 1_500_000, 999_999, 0, 60_000_001])
+def test_a_boundary_the_metadata_cannot_carry_is_refused(boundary_us):
+    """ModelMeta.boundary_seconds is whole seconds, and a node compares it exactly.
+
+    Rounding instead of refusing publishes a model fit at one boundary under the label
+    of another, so a node set to the real value refuses it while a node set to the
+    rounded one accepts labels that mean something else.
+    """
+    with pytest.raises(ValueError, match="whole number of seconds"):
+        whole_seconds(boundary_us)

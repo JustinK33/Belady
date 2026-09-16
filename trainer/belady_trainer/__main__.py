@@ -72,8 +72,37 @@ def cmd_boundary(args: argparse.Namespace) -> int:
     return 0
 
 
+def whole_seconds(boundary_us: int) -> int:
+    """Convert a boundary to the whole seconds ModelMeta carries, or refuse.
+
+    ModelMeta.boundary_seconds is a uint32 of seconds, and a cache node compares it
+    against its own MODEL_BOUNDARY exactly. Anything this cannot represent has to be
+    refused rather than rounded: 500ms floors to 0 and dies in publish, and 1500ms
+    truncates to 1, which publishes a model fit at one boundary under the label of
+    another. A node set to 1500ms then refuses it and a node set to 1s accepts it,
+    which is the one outcome sharing the variable is supposed to rule out.
+    """
+    if boundary_us % 1_000_000 != 0 or boundary_us < 1_000_000:
+        raise ValueError(
+            f"{boundary_us / 1e6:g}s is not a boundary the registry metadata can "
+            f"carry. ModelMeta.boundary_seconds is whole seconds, so the boundary "
+            f"must be a whole number of seconds and at least 1s. Run `boundary` for "
+            f"this trace's reuse times and pick between p90 and p99."
+        )
+    return boundary_us // 1_000_000
+
+
 def cmd_train(args: argparse.Namespace) -> int:
-    boundary_us = parse_duration_us(args.boundary)
+    # Before _load, so an unusable boundary costs nothing rather than surfacing after
+    # a full fit has been written to disk. A message rather than a traceback, because
+    # MODEL_BOUNDARY is a value an operator types and this is the only feedback on it.
+    try:
+        boundary_us = parse_duration_us(args.boundary)
+        boundary_seconds = whole_seconds(boundary_us)
+    except ValueError as err:
+        print(f"error: MODEL_BOUNDARY={args.boundary!r}: {err}", file=sys.stderr)
+        return 2
+
     trace = _load(args.traces)
 
     data = samples.build(
@@ -119,7 +148,7 @@ def cmd_train(args: argparse.Namespace) -> int:
         args.publish,
         body,
         version=publish_mod.version_for(),
-        boundary_seconds=boundary_us // 1_000_000,
+        boundary_seconds=boundary_seconds,
         feature_count=columns.COUNT,
         metrics={
             "auc": f"{result.auc:.4f}",

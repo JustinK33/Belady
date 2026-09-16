@@ -258,6 +258,8 @@ Each process uses its own `prometheus.Registry` rather than the default one, so 
 | --- | --- |
 | `no .trace segments ... .partial file(s) are still open` | No segment has rotated yet. Turn `TRACE_SEGMENT_BYTES` and `TRACE_SEGMENT_MAX_AGE` down, or stop the node cleanly. |
 | Trainer exits 2 with "too one-sided to rank candidates with" | The boundary is outside the workload's reuse times. Run `boundary` and pick a value between p90 and p99, subject to the 1 s floor. |
+| Trainer exits 2 with "not a boundary the registry metadata can carry" | `MODEL_BOUNDARY` is sub-second or a fraction of a second. Whole seconds only, because that is what `ModelMeta.boundary_seconds` holds. |
+| Cache node exits 2 naming `MODEL_BOUNDARY` | The value is not a Go duration. This is the one knob where a typo is fatal rather than a fallback, because a fallback means refusing every model. |
 | `belady_model_load_failures_total` climbing | Read the node log. Almost always `MODEL_BOUNDARY` differing between trainer and node. |
 | `Stats.policy` is `"mixed"` | Nodes are running different policies. Any hit-ratio comparison across the cluster is meaningless until that is fixed. |
 | Every `Put` returns `admitted: false` | The object is larger than one shard's budget. Fewer shards or more capacity. |
