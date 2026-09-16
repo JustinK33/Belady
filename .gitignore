@@ -26,6 +26,10 @@ coverage.html
 cpu.out
 mem.out
 
+# Sweep output. A measurement artifact: the numbers that matter go into
+# docs/03-performance.md with the command that produced them.
+sweep*.jsonl
+
 # Trained model blobs and captured traces (large, regenerable)
 /models/
 /traces/
