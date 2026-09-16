@@ -86,13 +86,18 @@ Each policy starts cold. The model is a 13-tree LightGBM fit on 80,120 rows samp
 The learned policy wins on hit ratio and closes 9.4% of the remaining gap to optimal.
 It also costs 4.5x more per eviction, and that is the more interesting number.
 
-At 0.111 evictions per request, the extra 6.5 µs per eviction works out to roughly 0.72 µs per request, while the 0.66-point hit-ratio gain saves 1.32 µs per request against a flat 200 µs origin.
-Break-even, near enough: 0.6 µs against a 1.84 ms p50 is 0.03% either way.
-Throughput is not in the table on purpose, because four runs of this configuration spanned 17% on a machine where six processes share eight cores, so it is not measured here even though hit ratio and eviction cost are.
-A learned policy pays off in proportion to how expensive a miss is, so this workload, with a fast local origin, is close to the worst case for it.
-Read the hit-ratio number as the interesting result and the eviction cost as the price.
+At 0.111 evictions per request, the extra 6.5 µs per eviction works out to roughly 0.72 µs per request spent.
+What that buys depends entirely on what a miss costs, and a later sweep of `ORIGIN_LATENCY` from 0 to 20 ms measured it instead of assuming it.
+A miss against this same 200 µs origin costs **927 µs at the margin**, not 200 µs, because it also pays gRPC out to the origin and back, a single-flight rendezvous, and queueing behind 63 other in-flight requests.
+So the 0.66-point gain saves about 7.4 µs per request, the break-even is **50 to 57 µs of marginal miss cost**, and the cheapest miss this stack can produce still costs 397 µs.
+The learned policy is on the paying side everywhere it was measured, by roughly an order of magnitude.
 
-[docs/03-performance.md](docs/03-performance.md) has the full method, the exact commands, and what does not reproduce even with a fixed seed.
+It is also invisible: 7.4 µs against a 1.84 ms p50 is 0.4%, well inside the 17% spread four runs of this configuration showed on a machine where six processes share eight cores.
+Throughput is out of the table for that reason.
+The two tail columns should be read the same way: the sweep's medians put LRU ahead at p99 at all five origin latencies, the opposite of the row below, so that difference is noise rather than a win.
+Read the hit ratio as the interesting result, the eviction cost as the price, and neither as something a client would notice.
+
+[docs/03-performance.md](docs/03-performance.md) has the full method, the exact commands, the origin-latency curve, and what does not reproduce even with a fixed seed.
 
 ## What building this taught me
 
@@ -107,8 +112,14 @@ Sampling each inter-access interval at a uniformly random offset instead is what
 That one decision was worth more than any parameter on the booster.
 
 **A hit-ratio win is not a latency win, and the arithmetic is short enough that there is no excuse for skipping it.**
-0.66 points of hit ratio against a 200 µs origin is 1.32 µs saved per request; 6.5 µs of extra eviction cost at 0.111 evictions per request is 0.72 µs spent.
+6.5 µs of extra eviction cost at 0.111 evictions per request is 0.72 µs spent, against 0.66 points of hit ratio saved.
 Whether learned eviction is worth it depends almost entirely on what a miss costs, and that is a deployment fact, not a research one.
+
+**Doing that arithmetic with a number you configured rather than a number you measured is how it comes out wrong.**
+The first version of it priced an avoided miss at `ORIGIN_LATENCY`, on the reasoning that a flat-latency origin fixture exists precisely so the miss cost is exact.
+It is exact and it is not the miss cost: a miss also pays transport, a single-flight rendezvous and queueing, which together came to 730 µs on top of whatever the origin sleeps for.
+The conclusion had been "roughly break-even, do not claim a direction", and the direction was actually a factor of ten, hidden by an assumption that looked too obvious to check.
+Splitting the load generator's mean latency by hit and miss turns that into one measured column, which is a two-line change nobody had a reason to make until the number it produced disagreed.
 
 **A microbenchmark that has no baseline in it cannot be off by a factor, because it is not measuring the same thing.**
 The old headline here was that eviction cost 7x more live than the microbenchmark predicted, and blamed a hot model in L1.

@@ -107,6 +107,31 @@ It is off by default because both samplers add work to every lock acquisition an
 
 ## Tuning
 
+### Picking a policy
+
+`CACHE_POLICY=lrb` costs about 5 µs more per eviction than `lru` and buys hit ratio.
+Whether that is a good trade is arithmetic on one number: **what a miss costs at the margin.**
+
+```
+lrb pays when   marginal miss cost  >  (extra ns per eviction x evictions per request) / delta hit ratio
+```
+
+Measured on the benchmark workload that comes to **50 to 57 µs**, and the important part is that this is not the latency you configured on the thing behind the cache.
+A miss also pays the network out to the backing store and back, whatever coalescing you do, and queueing behind every other miss in flight.
+On the three-node stack here that overhead alone is 397 µs against an origin configured for zero, and 730 µs against a slow one, so the learned policy is past break-even by roughly an order of magnitude at every origin latency from 0 to 20 ms.
+
+The practical reading: **if there is a network between the cache and its backing store, the trade is worth it, and the eviction cost is not the thing to worry about.**
+The case where it is not worth it is an in-process or same-socket origin answering in tens of microseconds, and that case is also the one where a cache is doing less for you in the first place.
+
+To measure it on your own workload rather than trusting that, run `loadgen` against the cluster and read the `mean` row:
+
+```
+  mean         2.61ms (hit 2.48ms, miss 3.40ms, marginal 927µs)
+```
+
+`marginal` is the number the formula wants.
+`make bench-sweep` does the same thing across a range of origin latencies and prints the break-even per point; [03-performance.md](03-performance.md#the-origin-latency-curve) has the tables and, more importantly, the reason the hit-ratio half of that comparison is only trustworthy against a fast origin.
+
 ### Capacity
 
 `CACHE_CAPACITY` counts **cached value bytes only.**
@@ -211,7 +236,7 @@ Read these in this order:
 
 - **`positive_rate`** first. Outside 2% to 98% the trainer refuses to fit and prints the reuse-time quantiles instead. That is the boundary being wrong, not the model.
 - **`holdout_auc`** second, and remember the holdout is split chronologically, not at random. Below about 0.7 the model is not ranking usefully and a boundary closer to the median is the first thing to try.
-- **`trees`** third, because it is the inference budget, and it is an outcome of early stopping rather than a setting. The 41 above is well over budget: 13 trees costs between 0.50 and 1.89 µs per eviction for eight candidates depending on how predictable the walk is, so the microsecond runs out somewhere between 7 and 26 trees and 41 buys its AUC with latency. Two fits of the same workload minutes apart gave 13 trees and 41, so read this field every time rather than assuming it holds. See [03-performance.md](03-performance.md).
+- **`trees`** third, because it is the inference budget, and it is an outcome of early stopping rather than a setting. The 41 above is well over budget: 13 trees costs between 0.50 and 1.89 µs per eviction for eight candidates depending on how predictable the walk is, so the microsecond runs out somewhere between 7 and 26 trees and 41 buys its AUC with latency. Three fits of the same workload at the same boundary have given 41 trees, 13 and 7, all within 16 basis points of AUC, so read this field every time rather than assuming it holds. See [03-performance.md](03-performance.md).
 - **`dropped_censored`** last, as a sanity check. A large fraction means the trace is too short relative to the boundary: 716 of 80,898 records here, against a 1 s boundary on a 19.2 s trace.
 
 ### Confirming the rollout

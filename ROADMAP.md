@@ -3,13 +3,14 @@
 What is built, what is next, and what has been deliberately left out.
 Kept in the repo rather than in an issue tracker so the plan and the code go stale together, which at least makes the drift visible.
 
-Last reviewed 2026-09-14.
+Last reviewed 2026-09-16.
 
 ## Where the project stands
 
 The end-to-end loop works and is measured.
 The cluster serves traffic, samples its own access traces, trains a model from them, publishes it, and all three cache nodes install it without a restart.
 The learned policy beats sampled LRU on hit ratio by 0.66 points and costs 4.5 times more per eviction; the numbers and the break-even arithmetic are in the [README](README.md), and the method behind them is in [docs/03-performance.md](docs/03-performance.md).
+An origin-latency sweep then put a number on what that trade is worth: the learned policy pays whenever a miss costs more than about 55 µs at the margin, and the cheapest miss this stack can produce costs 397 µs.
 
 | Step | What it delivered | State |
 | --- | --- | --- |
@@ -29,6 +30,7 @@ The learned policy beats sampled LRU on hit ratio by 0.66 points and costs 4.5 t
 | 15 | `docs/` prose, nine ADRs, the architecture diagrams | done |
 | 16 | Final measured pass, numbers into the docs | done |
 | 17 | Usable mode: REST surface, per-entry TTL, optional origin, two-container stack | done |
+| 18 | Origin-latency sweep: what a miss costs, and the break-even that follows | done, half open |
 
 Steps 13 and 14 were written without a running Docker daemon and without a push to GitHub, so they sat at "done, unverified" until the first real Actions run.
 That run found four bugs no local check had, which is the argument for pushing early rather than reading YAML harder: `sha256sum *` unquoted in the release job, a repository description containing a double quote that buildx parses as CSV and rejects on every image build, seven reachable stdlib advisories on the `go` directive, and a fresh Docker named volume being root-owned so every node logged a write failure once a second while serving happily.
@@ -70,6 +72,37 @@ Everything in the results table was re-measured against a pinned, executed block
 Throughput was dropped from the table rather than restated, because four runs of the same configuration spanned 17% on a machine where six containers share eight cores, while hit ratio held to 4 basis points and eviction cost to 4%.
 Reporting a number that noisy next to numbers that stable would have implied all of them were measurements.
 
+## Step 18, as built
+
+`make bench-sweep` runs `ORIGIN_LATENCY` across 0, 50 µs, 200 µs, 2 ms and 20 ms, three repeats per policy, 30 runs of 400,000 requests, one 7-tree model throughout.
+The full tables are in [The origin-latency curve](docs/03-performance.md#the-origin-latency-curve).
+
+**It found an arithmetic error, not just a curve.**
+Step 16 priced an avoided miss at `ORIGIN_LATENCY`, a flat 200 µs.
+A miss also pays gRPC out to the origin and back, a single-flight rendezvous, and queueing behind 63 other in-flight requests, and `loadgen` now measures the difference directly by splitting its mean latency on whether the gateway answered from cache.
+Against that same 200 µs origin a miss costs **927 µs at the margin**, so the saving was understated 4.6x and "roughly break-even, do not claim a direction" was wrong in a way that was knowable at the time.
+The break-even is **50 to 57 µs of marginal miss cost**, and the cheapest miss the sweep can construct, against an origin that sleeps for zero, still costs 397 µs.
+The crossing is below this stack's floor, so on this deployment the learned policy is on the paying side everywhere, and the question "at what origin latency does it start to pay" has no answer inside the measurable range.
+
+**The hit-ratio half is half open, because the load generator turned out to be part of the measurement.**
+The curve rests on `Δhit` being independent of origin latency, since the policy cannot see the origin.
+It is not: it drifts from +80 bp at a zero-latency origin to **-50 bp at 20 ms**.
+The cause is that `loadgen` is a closed loop of 64 workers, so a worker that misses stalls for the whole miss cost while the other 63 keep going.
+A slow origin therefore rate-limits cold-key traffic specifically and lets hot-key traffic through untouched, which enriches the stream the cache sees in hot keys and raises every policy's hit ratio for free.
+LRU has more misses to be throttled, so it gains 141 bp where LRB gains 11, and the difference between them closes and then inverts.
+The evidence that this is the generator and not the policy is that LRU's evictions per request falls 13% across the range while the offline Belady MIN for the replayed trace is fixed at 0.9348, so the trace did not change and the order it was delivered in did.
+That leaves the two fastest points, where the origin is too fast to reorder anything and LRB's hit ratio repeats to 3 and 6 basis points, as the whole trustworthy hit-ratio result.
+
+**Throughput is still not delivered, and it is the same 17% spread as step 16.**
+The sweep makes it worse: `req_per_sec` halves from about 29,000 to 14,000 across the range purely because each worker spends longer blocked.
+
+Both open halves want one fix, which is why they are now a single item rather than two: an **open-loop generator driving a fixed arrival rate**.
+That removes the coupling that contaminated `Δhit` and stops throughput from being a restatement of mean latency, and it is the marker on `results.mean` in `cmd/loadgen/main.go`.
+
+Two config defects fell out of running this rather than reading the YAML, which is the step 13 and 14 pattern again.
+`.env` sets `GATEWAY_PORT` and `TARGET_ADDR` independently 25 lines apart, so moving the published port to dodge a clash makes `make bench` answer "connection refused" from a cluster that is entirely healthy; both `make bench` and the sweep now ask Compose where the gateway actually landed.
+And `make up` printed its endpoints from make's own recipe shell, which does not read `.env`, so it printed the default port at anyone who had moved it.
+
 ## Known open items
 
 These are real, they are not blocked on anything, and they are ordered by how much they bother me.
@@ -89,7 +122,12 @@ Four prototypes across seven pool sizes put the best variant at 1.04x to 1.12x w
 The numbers and the controls are in [Batching the eight candidates into one pass, which does not work](docs/03-performance.md#batching-the-eight-candidates-into-one-pass-which-does-not-work).
 
 So the 74% stands, and what is left of it are the expensive options rather than the cheap ones: fewer trees, a shallower fit, a smaller `CACHE_SAMPLE_SIZE`, or a different model class.
-Each of those trades hit ratio for latency, so none is a free win and none should be taken without the origin-latency curve below.
+Each of those trades hit ratio for latency, so none is a free win, and step 18 below now prices the trade.
+At 0.11 evictions per request, **a microsecond of extra eviction cost has to buy about 1.2 basis points of hit ratio to pay for itself against a 200 µs origin, and about 0.05 basis points against a 20 ms one.**
+That is the exchange rate, and it says the direction to push on this stack is more model rather than less.
+Going from the 7-tree fit to the 41-tree one costs about 26 µs per eviction, taking the model's share of eviction cost as 74%, so it pays at a 200 µs origin if it buys roughly 31 basis points of hit ratio.
+Nobody knows whether it does, because the only thing measured between those two fits is 16 basis points of holdout AUC, which is not hit ratio.
+Measuring hit ratio against tree count directly is the cheap experiment this exchange rate makes worth running, and it is more informative than any further attempt to make the tree walk faster.
 
 **The Belady boundary must be at least one second, and the documented default is unusable.**
 `ModelMeta.boundary_seconds` is whole seconds, the registry rejects zero, and a cache node refuses any model whose boundary disagrees with its own `MODEL_BOUNDARY`.
@@ -114,9 +152,16 @@ That works on macOS, where the file sharing layer papers over ownership, and wil
 
 ## Later, in rough priority order
 
-**A hit-ratio-versus-cost sweep instead of a single data point.**
-The learned policy's value depends almost entirely on what a miss costs, so the honest chart is hit ratio and throughput against origin latency, from tens of microseconds to tens of milliseconds.
-That turns "roughly break-even here" into a curve with a crossing point.
+**An open-loop load generator driving a fixed arrival rate.**
+`loadgen` is 64 workers in a closed loop, which makes it part of two measurements it should be outside of.
+A worker that misses stops issuing requests until the miss resolves, so origin latency reorders the workload and hit ratio stops being a property of the policy alone, which is what left step 18's `Δhit` trustworthy at only two of five points.
+The same coupling makes mean latency roughly `concurrency / throughput`, so the 17% throughput spread reappears as latency noise and neither can be measured independently of the other.
+Issuing at a configured rate regardless of how fast responses come back fixes both, and it changes what a run reports: a fixed arrival rate can exceed what the cluster can serve, so the output becomes latency at a stated offered load, plus a queue that grows when the load is too high.
+That is a better benchmark shape anyway, and it is the single largest measurement gap left.
+
+**Hit ratio against tree count.**
+The exchange rate above says a microsecond of eviction cost has to buy 1.2 basis points at a 200 µs origin, and the fits this workload produces have ranged from 7 to 41 trees at essentially the same AUC.
+Nothing has measured what those trees are worth in hit ratio, which is the number that decides whether the inference budget is the right constraint to be designing around.
 
 **Replay against a real CDN trace.**
 Everything so far is Zipfian synthetic, and Zipf is kind to policies that lean on frequency.
