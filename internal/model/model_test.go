@@ -365,16 +365,19 @@ func BenchmarkRawVaryingFeatures(b *testing.B) {
 //
 // "Varying" above means 512 distinct vectors cycled. That is not varying enough. At
 // 13 trees of depth 5 there are only 512 x 13 root-to-leaf paths to learn, and the
-// branch predictor learns them: growing the pool alone takes the cost from 0.95 to
-// 3.68 ns per node visit, saturating around 8192 vectors. The live cache never
-// repeats a feature vector at all, so the saturated figure is the representative one
-// and everything measured at 512 vectors is optimistic by about 3.9x.
+// branch predictor learns them: growing the pool alone takes the cost from 0.96 to
+// 3.64 ns per node visit, most of it by 8192 vectors. The live cache never repeats a
+// feature vector at all, so the saturated figure is the representative one and
+// everything measured at 512 vectors is optimistic by about 3.9x.
 //
-// It is not the rows going cold. Each candidate reads one 64-byte row, once, and the
-// reads are sequential and prefetchable; more to the point the cost is flat from 256
-// KiB of rows to 16 MiB, straight across the L2-to-DRAM boundary, which no
-// cache-capacity story survives. darwin/arm64 gives no hardware counters, so
-// attributing the rest to branch prediction is inference and not measurement.
+// The rowsonly variant is the control, and it is the reason this is an attribution
+// rather than a guess: it walks the same pool with the same stride, touching one
+// float from each row so the same line is fetched, while evaluating a fixed vector.
+// That isolates the memory traffic from the walk, and it is flat at 43.6 ns from 32
+// KiB of rows to 16 MiB, against 62.1 to 236.6 for the real loop. So the pool is not
+// going cold: the reads are sequential and prefetched, and the entire difference is
+// the walk becoming unpredictable. darwin/arm64 exposes no branch-mispredict counter,
+// so naming the mechanism is still inference; ruling out the alternative is not.
 func BenchmarkRawVectorPool(b *testing.B) {
 	const (
 		features = 16
@@ -385,6 +388,12 @@ func BenchmarkRawVectorPool(b *testing.B) {
 	m, err := Load(strings.NewReader(text))
 	if err != nil {
 		b.Fatal(err)
+	}
+
+	report := func(b *testing.B) {
+		perOp := float64(b.Elapsed().Nanoseconds()) / float64(b.N)
+		b.ReportMetric(perOp*8, "ns/eviction")
+		b.ReportMetric(perOp/visits, "ns/nodevisit")
 	}
 
 	for _, vectors := range []int{512, 2048, 8192, 262144} {
@@ -402,9 +411,24 @@ func BenchmarkRawVectorPool(b *testing.B) {
 					i = 0
 				}
 			}
-			perOp := float64(b.Elapsed().Nanoseconds()) / float64(b.N)
-			b.ReportMetric(perOp*8, "ns/eviction")
-			b.ReportMetric(perOp/visits, "ns/nodevisit")
+			report(b)
+			keepAlive(b, m, sink)
+		})
+
+		b.Run(fmt.Sprintf("vectors=%d/rowsonly", vectors), func(b *testing.B) {
+			b.ReportAllocs()
+			hot := flat[:features]
+			var sink float32
+			i := 0
+			for b.Loop() {
+				// flat[i] alone, because 16 float32 is one 64-byte line: reading any
+				// element of the row costs the same fetch the real loop pays.
+				sink = m.Raw(hot) + flat[i]
+				if i += features; i == len(flat) {
+					i = 0
+				}
+			}
+			report(b)
 			keepAlive(b, m, sink)
 		})
 	}
