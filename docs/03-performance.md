@@ -204,12 +204,147 @@ At 0.111 evictions per request, an extra 6.5 µs per eviction is about **0.72 µ
 
 So the learned policy is about 0.6 µs per request ahead here, against a p50 of 1.84 ms.
 That is 0.03% of the latency a client sees, and far inside the run-to-run spread above.
-Call it break-even and do not claim a direction.
 
-This is the honest headline.
-A learned policy pays off in proportion to what a miss costs, and this workload has a very fast local origin, which is close to the worst case for it.
-Against a 20 ms origin the same 0.66 points would save 132 µs per request and the eviction cost would be noise.
-Turning that observation into a curve, hit ratio and throughput against origin latency from tens of microseconds to tens of milliseconds, is the most useful measurement this project does not yet have.
+**The second line of that arithmetic is wrong, and the sweep below is what found it.**
+Pricing an avoided miss at `ORIGIN_LATENCY` assumes a miss costs what the origin sleeps for.
+It does not.
+A miss also pays gateway to node to origin gRPC transport, a single-flight rendezvous, and queueing behind 63 other in-flight requests.
+Measured on this stack, a miss costs **927 µs at the margin against a flat 200 µs origin**, which is 4.6x the figure used above.
+So the saving was understated by 4.6x, the spent side was right, and the direction is no longer in doubt at this operating point.
+
+The correction does not rescue the "0.03% of client latency" observation, which stands.
+It changes what that observation means: the win is real and it is invisible, and those are two different claims.
+
+### The origin-latency curve
+
+Everything the learned policy is worth depends on what a miss costs, and the pass above measured exactly one miss cost.
+`make bench-sweep` sweeps `ORIGIN_LATENCY` across five points spanning 0 to 20 ms, three repeats per policy per point, 30 runs of 400,000 requests.
+Run on 2026-09-16 with `scripts/origin-latency-sweep.sh`, which pins the same configuration as the reproduce block below and prints it before the first run.
+
+**Setup delta from the pass above.**
+Only the origin latency moves.
+Object sizes come from `Hash(key + "#size")` in `cmd/origin/main.go`, so every point serves byte-identical objects, and `loadgen` reported the same offline Belady MIN of **0.9348 at all 30 runs**, `bytes_used` inside 18.27 to 18.59 MB and zero rejections throughout.
+One model spans the whole sweep, because two fits of this workload give different tree counts and a sweep that retrained would put a different model on each half of one curve.
+That model is `20260916T212632Z`: **7 trees**, 14 features, holdout AUC 0.9932, 1 s boundary.
+Seven is the same AUC as the 13-tree model in the table above from half the inference budget, and it is exactly the ceiling the [tree-count range](#what-the-model-actually-costs-which-is-a-range) puts on a microsecond of eviction.
+
+#### What a miss actually costs
+
+`loadgen` now reports its mean client latency split by whether the gateway answered from cache, so the marginal cost of a miss is measured per run rather than assumed.
+
+| `ORIGIN_LATENCY` | Marginal miss cost | Excess over the configured latency |
+| --- | --- | --- |
+| 0 | 397 µs | 397 µs |
+| 50 µs | 573 µs | 523 µs |
+| 200 µs | 927 µs | 727 µs |
+| 2 ms | 2765 µs | 765 µs |
+| 20 ms | 21,006 µs | 1006 µs |
+
+Median of three repeats, averaged across the two policies, which measure the same origin and agreed to within 6% at every point.
+
+Above 200 µs this is affine with **slope 1.014 and intercept 730 µs**, and the local slopes are 1.021 from 200 µs to 2 ms and 1.013 from 2 ms to 20 ms.
+So the origin honours the latency it is configured with, and a miss on this stack costs that latency plus about 0.73 ms of transport, rendezvous and queueing.
+
+Below 200 µs the local slope is 2.4 to 3.5, which is not the origin misbehaving.
+It is the queue draining: a cheaper miss means fewer misses outstanding at once, so each one waits behind less work, and the floor falls from 730 µs to 397 µs as the configured latency goes to zero.
+That is the closed loop showing up in the one quantity this sweep can measure cleanly, and it is the same coupling the marker on `results.mean` in `cmd/loadgen/main.go` names.
+
+#### What the policy costs
+
+| `ORIGIN_LATENCY` | LRU evict | LRB evict | Evictions/request | Spent per request |
+| --- | --- | --- | --- | --- |
+| 0 | 1491 ns | 5553 ns | 0.1128 | 458 ns |
+| 50 µs | 1582 ns | 5909 ns | 0.1123 | 486 ns |
+| 200 µs | 1844 ns | 6975 ns | 0.1211 | 621 ns |
+| 2 ms | 1835 ns | 6367 ns | 0.1117 | 506 ns |
+| 20 ms | 2299 ns | 7599 ns | 0.1092 | 579 ns |
+
+This is the constancy the curve needs, and it holds: **530 ns per request, spread 458 to 621**, or ±15% with no trend against a 400x change in origin latency.
+The learned policy's price does not depend on what a miss costs, which is what the model not being able to see the origin predicts.
+
+#### What the policy buys, and why this half is not measurable here
+
+| `ORIGIN_LATENCY` | LRU hit | LRB hit | Δhit | LRB spread over 3 repeats | LRU evictions/request |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 0.8598 | 0.8678 | +80 bp | 3 bp | 0.1213 |
+| 50 µs | 0.8583 | 0.8680 | +97 bp | 6 bp | 0.1228 |
+| 200 µs | 0.8586 | 0.8596 | +10 bp | 118 bp | 0.1221 |
+| 2 ms | 0.8667 | 0.8682 | +15 bp | 74 bp | 0.1142 |
+| 20 ms | 0.8739 | 0.8689 | **-50 bp** | 177 bp | 0.1058 |
+
+**Δhit is not constant, and the reason is the load generator rather than the policy.**
+This was the one hypothesis the sweep was built to check, and it fails.
+
+Read the last column.
+LRU's evictions per request falls monotonically from 0.1213 to 0.1058, a 13% drop, while the offline Belady MIN for the replayed trace is fixed at 0.9348 at every point.
+The trace did not change, so the *stream the cache saw* did.
+
+The mechanism is that `loadgen` is a closed loop of 64 workers.
+A worker that misses stalls for the full miss cost while the other 63 keep going, so a slow origin rate-limits cold-key traffic specifically and lets hot-key traffic stream through untouched.
+The access stream reaching the cache is therefore enriched in hot keys in proportion to origin latency, and every policy's hit ratio rises for free.
+It rises *more* for the policy with more misses to be throttled, which is LRU: it gains 141 bp from 0 to 20 ms while LRB's median moves 11 bp.
+That compresses Δhit toward zero and then past it.
+
+The same mechanism explains the spread column.
+At 0 and 50 µs the origin barely perturbs the generated order and LRB's hit ratio repeats to 3 and 6 basis points across three cold runs.
+From 200 µs up, worker interleaving becomes latency-dependent and the spread grows to 177 bp, which is 18x the effect being measured.
+
+So **`Δhit` is only trustworthy at the two points where the origin is too fast to reorder the workload**, and the honest reading of the +80 and +97 bp there is that it agrees with the +66 bp of the pass above to within the difference a 7-tree model makes.
+The three high-latency points measure a confounded quantity and are reported here because the confound is the finding.
+
+#### The crossing
+
+```
+net advantage per request = Δhit x marginal_miss_cost - Δevict x evictions_per_request
+```
+
+Setting that to zero at the two clean points gives the marginal miss cost at which this model breaks even:
+
+| `ORIGIN_LATENCY` | Spent | Δhit | Break-even marginal miss cost |
+| --- | --- | --- | --- |
+| 0 | 458 ns/request | 0.0080 | **57 µs** |
+| 50 µs | 486 ns/request | 0.0097 | **50 µs** |
+
+Call it **50 to 57 µs**, or 45 to 70 µs allowing 6 bp of hit-ratio noise and the ±15% on spent.
+
+**The crossing lies below this stack's floor, so there is no origin latency at which the learned policy loses here.**
+The cheapest miss the sweep could construct, against an origin that sleeps for zero, still costs 397 µs at the margin, which is 7x the break-even.
+At the 200 µs anchor the policy spends 621 ns per request and saves 0.0080 x 927 µs = 7.4 µs per request, and at 20 ms it would save 168 µs per request against the same 579 ns.
+
+That inverts the recorded headline, and it does so by correcting an arithmetic error rather than by measuring anything the pass above could not have measured.
+"At what origin latency does a learned policy start to pay" turns out to be the wrong question for this deployment, because the answer is below zero.
+The right form of the answer is the one in marginal miss cost: **it pays when a miss costs more than about 55 µs at the margin**, and a miss on any stack with a network between the cache and its backing store costs far more than that.
+A deployment whose transport floor were under 55 µs, meaning an in-process origin with no gRPC and no queue, would sit on the other side, and that is the case this sweep cannot reach.
+
+**This crossing is arithmetic on stable measurements, not a sign flip anyone watched happen.**
+Client latency cannot resolve it: the predicted difference is 0.03% of the mean at 200 µs and about 4% at 20 ms, against a mean that carries the 17% throughput spread above, because mean latency in a closed loop is roughly `concurrency / throughput`.
+The measured means bear that out and settle nothing, at every point.
+
+#### The tail, separately
+
+The curve is a mean model, and p99 is not the mean.
+
+| `ORIGIN_LATENCY` | LRU p99 | LRB p99 | LRU p99.9 | LRB p99.9 |
+| --- | --- | --- | --- | --- |
+| 0 | 5.54 ms | 6.17 ms | 10.18 ms | 13.68 ms |
+| 50 µs | 5.34 ms | 5.83 ms | 7.97 ms | 11.11 ms |
+| 200 µs | 6.53 ms | 7.24 ms | 11.62 ms | 13.57 ms |
+| 2 ms | 7.04 ms | 7.12 ms | 10.47 ms | 10.08 ms |
+| 20 ms | 24.37 ms | 26.28 ms | 33.71 ms | 48.78 ms |
+
+The medians favour LRU at p99 at all five points, by 1% to 11%.
+Run by run LRU wins 10 of 15 paired repeats at p99 and 11 of 15 at p99.9, so this is a lean and not a result.
+What it does do is fail to reproduce the pass above, where LRB was clearly ahead at p99 (5.20 ms against 6.29 ms) and behind at p99.9.
+Two passes disagreeing on the sign of a tail difference this small is the tail difference being noise, and the p99 line in that table should be read as unmeasured rather than as a win.
+
+#### What this does not deliver
+
+The roadmap asked for hit ratio *and throughput* against origin latency.
+Throughput is still the 17% spread, and the sweep makes that worse rather than better: `req_per_sec` falls from ~29,000 to ~14,000 across the range purely because each worker spends longer blocked, which is arithmetic, not a policy comparison.
+
+Both open halves want the same fix, which is why it is now one item rather than two.
+An **open-loop generator driving a fixed arrival rate** would stop a slow origin from reordering the workload, which is what contaminated Δhit, and would stop throughput from being a restatement of mean latency, which is what makes it unmeasurable.
+Until that exists, the two clean points are the whole hit-ratio result and the marginal miss cost is the whole latency result.
 
 ### The gap between the microbenchmark and the live number
 
@@ -343,11 +478,11 @@ The model does not.
 Trace sampling is one key in sixteen **by key hash**, so which keys land in the sample depends on the hash and the sampled fraction swings between runs.
 The tree count is an outcome of early stopping, not a setting.
 
-Two fits of this same workload, minutes apart at the same boundary, came out at 13 trees on 80,120 rows at 0.9932 AUC and **41 trees on 80,182 rows at 0.9948**.
-The row counts agree to 0.08% and the tree count varies by 3x, which is early stopping responding to which keys the hash happened to sample.
-That matters because trees are the inference budget: the second model would cost roughly three times as much per eviction for 16 basis points of AUC.
-So the 13-tree model is a property of one training run, and the LRB eviction cost in the table above moves with it.
-Expect the shape of the result to repeat and the third decimal place not to.
+Three fits of this same workload at the same boundary have now come out at **13 trees** on 80,120 rows at 0.9932 AUC, **41 trees** on 80,182 rows at 0.9948, and **7 trees** at 0.9932.
+The row counts agree to 0.08% and the tree count varies by 6x, which is early stopping responding to which keys the hash happened to sample.
+That matters because trees are the inference budget: the 41-tree model costs roughly six times as much per eviction as the 7-tree one for 16 basis points of AUC.
+So a tree count is a property of one training run, and the LRB eviction cost moves with it: 8343 ns/victim at 13 trees in the table above, 6975 ns/victim at 7 trees at the same origin latency in the sweep.
+Expect the shape of the result to repeat and the third decimal place not to, and read `trees` out of the trainer's output on every fit rather than assuming the last one holds.
 
 ## Reproducing any of this
 
@@ -372,7 +507,16 @@ docker compose -f deploy/compose.yaml up -d --force-recreate cachenode-0 cacheno
 make bench                                      # LRB with the model installed
 
 CACHE_POLICY=lru make up && make bench          # the baseline
+
+# The origin-latency curve, about 35 minutes. Continues from the state above rather
+# than starting over: it needs exactly one model in the volume, so do not down -v and
+# do not train again between here and there.
+make bench-sweep                                # 30 runs -> sweep.jsonl, then the table
+./scripts/origin-latency-sweep.sh --summarize sweep.jsonl   # re-read it for free
 ```
+
+The sweep owns the pinned block above rather than inheriting it, so the exports are not required for `make bench-sweep`, only for the single runs.
+It aborts rather than recording a row when a cluster reports `policy: "mixed"` or when an `lrb` run has an empty `model_version`, because both look like a measurement and are not.
 
 The recreate step is not optional.
 Nodes validate a model's `boundary_seconds` against their own `MODEL_BOUNDARY` and refuse a mismatch, so nodes started before the boundary was chosen will not accept the model:
