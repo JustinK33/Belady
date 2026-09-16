@@ -360,6 +360,56 @@ func BenchmarkRawVaryingFeatures(b *testing.B) {
 	})
 }
 
+// BenchmarkRawVectorPool is the correction to BenchmarkRawVaryingFeatures, and the
+// reason no model figure here should be read as a live cost.
+//
+// "Varying" above means 512 distinct vectors cycled. That is not varying enough. At
+// 13 trees of depth 5 there are only 512 x 13 root-to-leaf paths to learn, and the
+// branch predictor learns them: growing the pool alone takes the cost from 0.95 to
+// 3.68 ns per node visit, saturating around 8192 vectors. The live cache never
+// repeats a feature vector at all, so the saturated figure is the representative one
+// and everything measured at 512 vectors is optimistic by about 3.9x.
+//
+// It is not the rows going cold. Each candidate reads one 64-byte row, once, and the
+// reads are sequential and prefetchable; more to the point the cost is flat from 256
+// KiB of rows to 16 MiB, straight across the L2-to-DRAM boundary, which no
+// cache-capacity story survives. darwin/arm64 gives no hardware counters, so
+// attributing the rest to branch prediction is inference and not measurement.
+func BenchmarkRawVectorPool(b *testing.B) {
+	const (
+		features = 16
+		visits   = 13 * 5 // trees x depth, the node visits in one Raw call
+	)
+	rng := rand.New(rand.NewPCG(9, 1))
+	text, _ := synth(13, 5, features, rng)
+	m, err := Load(strings.NewReader(text))
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	for _, vectors := range []int{512, 2048, 8192, 262144} {
+		flat := make([]float32, vectors*features)
+		for i := range flat {
+			flat[i] = float32(rng.Float64() * 100)
+		}
+		b.Run(fmt.Sprintf("vectors=%d", vectors), func(b *testing.B) {
+			b.ReportAllocs()
+			var sink float32
+			i := 0
+			for b.Loop() {
+				sink = m.Raw(flat[i : i+features])
+				if i += features; i == len(flat) {
+					i = 0
+				}
+			}
+			perOp := float64(b.Elapsed().Nanoseconds()) / float64(b.N)
+			b.ReportMetric(perOp*8, "ns/eviction")
+			b.ReportMetric(perOp/visits, "ns/nodevisit")
+			keepAlive(b, m, sink)
+		})
+	}
+}
+
 func keepAlive(b *testing.B, m *Model, sink float32) {
 	b.Helper()
 	if sink == 0 && m.NumTrees() == 0 {
