@@ -9,7 +9,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"os"
 	"os/signal"
@@ -74,7 +76,9 @@ func main() {
 	// Warmup requests are excluded from the reported numbers. Measuring a cold
 	// cache measures how fast the origin is, not how good the policy is.
 	if opts.warmup > 0 {
-		fmt.Printf("warming up with %d requests\n", opts.warmup)
+		// Progress goes to stderr, because with REPORT_JSON on stdout is one object
+		// and a sweep pipes it straight into jq.
+		fmt.Fprintf(os.Stderr, "warming up with %d requests\n", opts.warmup)
 		if _, err := replay(ctx, client, trace[:min(opts.warmup, len(trace))], opts.concurrency); err != nil {
 			fmt.Fprintf(os.Stderr, "warmup: %v\n", err)
 			os.Exit(1)
@@ -87,7 +91,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("replaying %d requests at concurrency %d\n", len(trace), opts.concurrency)
+	fmt.Fprintf(os.Stderr, "replaying %d requests at concurrency %d\n", len(trace), opts.concurrency)
 	start := time.Now()
 	res, err := replay(ctx, client, trace, opts.concurrency)
 	if err != nil {
@@ -103,7 +107,12 @@ func main() {
 	}
 
 	sd := delta(before, after)
-	report(opts, trace, res, sd, elapsed)
+	d := derive(opts, trace, res, sd)
+	if config.Bool("REPORT_JSON", false) {
+		reportJSON(opts, res, sd, d, elapsed)
+	} else {
+		report(opts, res, sd, d, elapsed)
+	}
 
 	if !withinThresholds(opts, res, sd) {
 		os.Exit(1)
@@ -267,9 +276,56 @@ func delta(before, after *beladyv1.StatsResponse) serverDelta {
 	}
 }
 
-func report(opts options, trace []string, res *results, sd serverDelta, elapsed time.Duration) {
-	objectHit := ratio(sd.hits, sd.hits+sd.misses)
-	byteHit := ratio(sd.hitB, sd.missB+sd.hitB)
+// derived is everything computed from a run rather than counted during it. It is
+// hoisted out of the reporters so the text and the JSON forms cannot come to
+// different conclusions about the object-count conversion behind Belady's MIN.
+type derived struct {
+	objectHit, byteHit  float64
+	evictionsPerRequest float64
+
+	// haveOptimum is false when nothing was served or the cache reported no objects,
+	// because then there is no observed mean object size to convert a byte capacity
+	// with and the MIN comparison has no denominator.
+	haveOptimum     bool
+	meanSize        float64
+	capacityObjects int
+	optimum         float64
+}
+
+func derive(opts options, trace []string, res *results, sd serverDelta) derived {
+	d := derived{
+		objectHit: ratio(sd.hits, sd.hits+sd.misses),
+		byteHit:   ratio(sd.hitB, sd.missB+sd.hitB),
+	}
+	if res.served == 0 {
+		return d
+	}
+	// Evictions per request is what converts a per-victim cost into a per-request one,
+	// which is the only form in which it can be set against a hit-ratio gain.
+	d.evictionsPerRequest = float64(sd.evictions) / float64(res.served)
+	if sd.objects == 0 {
+		return d
+	}
+
+	// The optimum is scored on the same trace the server just replayed, at a capacity
+	// converted from bytes using the mean object size actually observed.
+	d.haveOptimum = true
+	d.meanSize = float64(sd.bytesUsed) / float64(sd.objects)
+	d.capacityObjects = int(float64(sd.bytesCapacity) / d.meanSize)
+
+	// MIN has to see the warmup too. The server entered the measured window with a
+	// populated cache; scoring the optimum from cold would compare a warm policy
+	// against a cold ceiling and the ceiling can land below the policy.
+	warmup := min(opts.warmup, len(trace))
+	scored := make([]string, 0, warmup+len(trace))
+	scored = append(scored, trace[:warmup]...)
+	scored = append(scored, trace...)
+	d.optimum = belady.MINHitRatioFrom(hashTrace(scored), d.capacityObjects, warmup)
+	return d
+}
+
+func report(opts options, res *results, sd serverDelta, d derived, elapsed time.Duration) {
+	objectHit, byteHit := d.objectHit, d.byteHit
 
 	fmt.Printf("\nbelady loadgen\n")
 	row("target", opts.target)
@@ -287,25 +343,11 @@ func report(opts options, trace []string, res *results, sd serverDelta, elapsed 
 	row("evictions", fmt.Sprintf("%d, %d rejected", sd.evictions, sd.rejections))
 	row("evict cost", fmt.Sprintf("%d ns/victim over the window (includes one clock read)", sd.evictNS))
 
-	// The optimum is scored on the same trace the server just replayed, at a
-	// capacity converted from bytes using the mean object size actually observed.
-	if res.served > 0 && sd.objects > 0 {
-		meanSize := float64(sd.bytesUsed) / float64(sd.objects)
-		capacityObjects := int(float64(sd.bytesCapacity) / meanSize)
-
-		// MIN has to see the warmup too. The server entered the measured window with
-		// a populated cache; scoring the optimum from cold would compare a warm
-		// policy against a cold ceiling and the ceiling can land below the policy.
-		warmup := min(opts.warmup, len(trace))
-		scored := make([]string, 0, warmup+len(trace))
-		scored = append(scored, trace[:warmup]...)
-		scored = append(scored, trace...)
-		optimum := belady.MINHitRatioFrom(hashTrace(scored), capacityObjects, warmup)
-
+	if d.haveOptimum {
 		fmt.Printf("\noffline optimum (Belady MIN)\n")
-		row("capacity", fmt.Sprintf("%d objects, from a %.0f byte mean", capacityObjects, meanSize))
-		row("object hit", fmt.Sprintf("%.4f", optimum))
-		row("gap", fmt.Sprintf("%+.2f points", (objectHit-optimum)*100))
+		row("capacity", fmt.Sprintf("%d objects, from a %.0f byte mean", d.capacityObjects, d.meanSize))
+		row("object hit", fmt.Sprintf("%.4f", d.optimum))
+		row("gap", fmt.Sprintf("%+.2f points", (objectHit-d.optimum)*100))
 		// Two reasons this is a bound and not an equality: capacity is counted in
 		// objects rather than bytes, and MIN models one unified cache while the real
 		// cluster is nodes x shards, each independently capped. Sharding can only
@@ -325,6 +367,92 @@ func report(opts options, trace []string, res *results, sd serverDelta, elapsed 
 	row("throughput", fmt.Sprintf("%.0f req/s, %s/s", float64(res.served)/elapsed.Seconds(), bytes(uint64(float64(res.bytes)/elapsed.Seconds()))))
 	fmt.Println()
 }
+
+// record is the sweep's interface to this tool. The text report above stays the
+// default and is what docs/03-performance.md quotes; an origin-latency sweep is
+// thirty runs, and scraping that text would be the most fragile part of the
+// measurement.
+//
+// Flat, snake_case and indented, following the trainer's Result.summary(), which is
+// the only other machine-readable stdout in the tree.
+type record struct {
+	Policy       string `json:"policy"`
+	ModelVersion string `json:"model_version"`
+	// OriginLatency is echoed straight from the environment, so a row of JSONL carries
+	// its own x axis. It is the one field here loadgen cannot verify: it is what the
+	// sweep asked the origin for, and the check that the origin honoured it is that
+	// marginal_miss_ns tracks it with a slope near 1.
+	OriginLatency string `json:"origin_latency"`
+
+	Requests    int     `json:"requests"`
+	Concurrency int     `json:"concurrency"`
+	Keyspace    int     `json:"keyspace"`
+	ZipfS       float64 `json:"zipf_s"`
+
+	ObjectHit           float64 `json:"object_hit"`
+	ByteHit             float64 `json:"byte_hit"`
+	BeladyMIN           float64 `json:"belady_min"`
+	Evictions           uint64  `json:"evictions"`
+	Rejections          uint64  `json:"rejections"`
+	EvictionsPerRequest float64 `json:"evictions_per_request"`
+	EvictNSPerVictim    uint64  `json:"evict_ns_per_victim"`
+	BytesUsed           uint64  `json:"bytes_used"`
+
+	MeanNS         int64 `json:"mean_ns"`
+	MeanHitNS      int64 `json:"mean_hit_ns"`
+	MeanMissNS     int64 `json:"mean_miss_ns"`
+	MarginalMissNS int64 `json:"marginal_miss_ns"`
+	P50NS          int64 `json:"p50_ns"`
+	P99NS          int64 `json:"p99_ns"`
+	P999NS         int64 `json:"p99_9_ns"`
+
+	ReqPerSec float64 `json:"req_per_sec"`
+	ElapsedMS int64   `json:"elapsed_ms"`
+}
+
+func reportJSON(opts options, res *results, sd serverDelta, d derived, elapsed time.Duration) {
+	rec := record{
+		Policy:        sd.policy,
+		ModelVersion:  sd.modelVersion,
+		OriginLatency: config.String("ORIGIN_LATENCY", ""),
+
+		Requests:    res.served,
+		Concurrency: opts.concurrency,
+		Keyspace:    opts.keyspace,
+		ZipfS:       opts.zipfS,
+
+		ObjectHit:           round4(d.objectHit),
+		ByteHit:             round4(d.byteHit),
+		BeladyMIN:           round4(d.optimum),
+		Evictions:           sd.evictions,
+		Rejections:          sd.rejections,
+		EvictionsPerRequest: round4(d.evictionsPerRequest),
+		EvictNSPerVictim:    sd.evictNS,
+		BytesUsed:           sd.bytesUsed,
+
+		MeanNS:         res.mean().Nanoseconds(),
+		MeanHitNS:      res.meanHit().Nanoseconds(),
+		MeanMissNS:     res.meanMiss().Nanoseconds(),
+		MarginalMissNS: (res.meanMiss() - res.meanHit()).Nanoseconds(),
+		P50NS:          res.quantile(0.50).Nanoseconds(),
+		P99NS:          res.quantile(0.99).Nanoseconds(),
+		P999NS:         res.quantile(0.999).Nanoseconds(),
+
+		ReqPerSec: round4(float64(res.served) / elapsed.Seconds()),
+		ElapsedMS: elapsed.Milliseconds(),
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(rec); err != nil {
+		fmt.Fprintf(os.Stderr, "encode report: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// round4 keeps the ratios readable at the resolution they are trustworthy to. Hit
+// ratio repeats to a few basis points run to run, so a fifth decimal place would be
+// noise dressed as precision.
+func round4(v float64) float64 { return math.Round(v*1e4) / 1e4 }
 
 // meanMiss minus meanHit is the marginal cost of a miss, which is the quantity the
 // break-even arithmetic in docs/03-performance.md is expressed in. Reporting it

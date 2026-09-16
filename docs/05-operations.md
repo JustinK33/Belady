@@ -97,6 +97,7 @@ Durations are Go duration strings: `250ms`, `30s`, `10m`, `1h30m`.
 `loadgen` takes `TARGET_ADDR`, `REQUESTS`, `KEYSPACE`, `CONCURRENCY`, `WARMUP`, `ZIPF_S`, `SEED`, plus the two gate thresholds `MIN_OBJECT_HIT` and `MAX_P99`.
 Zero on either gate means report only.
 `ZIPF_S` must be greater than 1.
+`REPORT_JSON=true` replaces the human report with one flat JSON object on stdout, which is how the origin-latency sweep reads a run; progress lines are on stderr either way, and the gate behaves identically.
 
 All services take `LOG_LEVEL` (`debug`, `info`, `warn`, `error`) and `LOG_FORMAT` (`json` or `text`).
 
