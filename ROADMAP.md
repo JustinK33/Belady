@@ -114,10 +114,6 @@ That works on macOS, where the file sharing layer papers over ownership, and wil
 
 ## Later, in rough priority order
 
-**Score all eight candidates in one batched pass.**
-The profile says tree evaluation is 74% of eviction cost, so this is the only change with a factor in it rather than a percent.
-It is a hot-path change to `internal/model` and `internal/cache/lrb.go`, and the guard is that eviction must stay at zero allocations.
-
 **A hit-ratio-versus-cost sweep instead of a single data point.**
 The learned policy's value depends almost entirely on what a miss costs, so the honest chart is hit ratio and throughput against origin latency, from tens of microseconds to tens of milliseconds.
 That turns "roughly break-even here" into a curve with a crossing point.
