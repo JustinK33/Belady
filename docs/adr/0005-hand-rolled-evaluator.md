@@ -44,3 +44,14 @@ More portable and would support model types this evaluator does not.
 Rejected for the same call-overhead reason, plus a large native dependency in every cache node image for a workload whose fitted models run to a few dozen shallow trees.
 
 Both are listed as out of scope in the roadmap rather than as later work, because the sub-microsecond budget is the interesting constraint of this project and delegating inference removes the thing being studied.
+
+**A batched evaluator, scoring the whole eviction sample in one pass over the trees.**
+This is the one that looked like a clear win and is not.
+The eight candidates are independent and each walk is a chain of two dependent loads per level, so interleaving them should give the load unit several chains at once, and a CPU profile puts `Raw` at 74% of eviction cost.
+
+Four shapes were prototyped and measured before anything was added to `Raw`: tree-outer with candidate-inner, level-lockstep, and hand-unrolled scalar locals at widths 4 and 8.
+At the live shape the best was 1.04x to 1.09x, and **once the feature vectors stop repeating often enough for the branch predictor to memorise the paths, every batched shape is slower than eight sequential `Raw` calls.**
+The arithmetic said so beforehand: 65 node visits in 60 ns is about 3 cycles per visit, which a strictly serial two-load chain cannot reach, so `Raw` was already overlapping several chains and there was less parallelism left to find than the profile suggested.
+
+Rejected on the measurement, in [03-performance.md](../03-performance.md#batching-the-eight-candidates-into-one-pass-which-does-not-work).
+`Raw` stays one candidate at a time, which is also what keeps it the reference the exactness test is written against.

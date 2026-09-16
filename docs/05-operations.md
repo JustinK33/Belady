@@ -153,6 +153,7 @@ That refusal is the system working, but it means choosing this value is a requir
 `CACHE_SAMPLE_SIZE` trades victim quality against eviction cost, linearly on the model path: 8 candidates is 8 model evaluations.
 8 is the default and is what every measurement here used.
 Going to 16 roughly doubles the learned policy's eviction cost, which [03-performance.md](03-performance.md) shows is already the expensive half of the trade.
+The linearity is not an implementation detail waiting to be optimised away: scoring the whole sample in one pass over the trees was prototyped and measured, and it is slower than the sequential calls once the walk is genuinely unpredictable.
 
 ### Trace sampling
 
@@ -209,7 +210,7 @@ Read these in this order:
 
 - **`positive_rate`** first. Outside 2% to 98% the trainer refuses to fit and prints the reuse-time quantiles instead. That is the boundary being wrong, not the model.
 - **`holdout_auc`** second, and remember the holdout is split chronologically, not at random. Below about 0.7 the model is not ranking usefully and a boundary closer to the median is the first thing to try.
-- **`trees`** third, because it is the inference budget, and it is an outcome of early stopping rather than a setting. The 41 above is already over budget: `internal/model`'s own sweep puts 25 trees at roughly the full microsecond for eight candidates, so this model buys its AUC with latency. Two fits of the same workload minutes apart gave 13 trees and 41, so read this field every time rather than assuming it holds. See [03-performance.md](03-performance.md).
+- **`trees`** third, because it is the inference budget, and it is an outcome of early stopping rather than a setting. The 41 above is well over budget: 13 trees costs between 0.50 and 1.89 µs per eviction for eight candidates depending on how predictable the walk is, so the microsecond runs out somewhere between 7 and 26 trees and 41 buys its AUC with latency. Two fits of the same workload minutes apart gave 13 trees and 41, so read this field every time rather than assuming it holds. See [03-performance.md](03-performance.md).
 - **`dropped_censored`** last, as a sanity check. A large fraction means the trace is too short relative to the boundary: 716 of 80,898 records here, against a 1 s boundary on a 19.2 s trace.
 
 ### Confirming the rollout
@@ -301,4 +302,5 @@ go tool pprof -http=: http://localhost:9201/debug/pprof/heap
 curl -o trace.out 'http://localhost:9201/debug/pprof/trace?seconds=5'
 ```
 
-The first of those is the outstanding piece of work on this project: [03-performance.md](03-performance.md) has an eviction cost about 7x higher than the microbenchmarks predict and no profile to explain it.
+The first of those is what closed the eviction-cost gap: it puts `model.Raw` at 74% of `lrb.Victim`, against 16% for feature extraction and 10% for sampling, which ruled out both of the optimisations that gap used to imply.
+[03-performance.md](03-performance.md) has the split and what came of it.

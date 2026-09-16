@@ -74,18 +74,22 @@ Reporting a number that noisy next to numbers that stable would have implied all
 
 These are real, they are not blocked on anything, and they are ordered by how much they bother me.
 
-**Tree evaluation is 74% of eviction cost, and nothing has been done about it yet.**
+**Tree evaluation is 74% of eviction cost, and every cheap way of reducing it is now ruled out by measurement.**
 This item used to read "the live eviction penalty is about 7x worse than the microbenchmark predicts, and that remainder is unexplained".
-It is now accounted for to within about 1.4x, and the write-up is under [The gap between the microbenchmark and the live number](docs/03-performance.md#the-gap-between-the-microbenchmark-and-the-live-number).
+The live figure now falls inside a predicted range rather than beside a predicted point, and the write-up is under [The gap between the microbenchmark and the live number](docs/03-performance.md#the-gap-between-the-microbenchmark-and-the-live-number).
 The short version is that most of the gap was never about the model: LRU inflates 9.8x on the same trip from a native single-shard benchmark to a containerized three-node cluster, and the original comparison never ran the baseline through both ends.
 
-Both of the fixes this item used to imply are now ruled out by measurement.
 Descheduling under the shard lock is falsified: with contention profiling on for a full run, the mutex profile attributes 4.13 ms to the shard lock and all of it to reads, with `insert` and `evictOne` absent, the block profile attributes nothing to the `cache` package, and a CPU profile puts `lrb.Victim` at the same on-CPU time the counter reports as wall time.
 Map-range sampling and the `Entry` layout are 10% and 16% of `Victim` respectively, so optimizing either would move a tenth of the cost.
 
-What is left is the 74%: `model.Raw` over 13 trees.
-The lever with the most behind it is evaluating all eight candidates in one pass instead of eight, because a fixed feature vector is 1.35x faster than a varying one purely on branch prediction (`BenchmarkRawVaryingFeatures`), and batching is what would let the predictor see one walk instead of eight.
-That is a hot-path change and is deliberately not in this pass.
+Batching the eight candidates into one pass over the trees is also settled, and it does not work.
+This item used to claim the lever was worth 1.35x on branch prediction, citing `BenchmarkRawVaryingFeatures`, and that was wrong twice over.
+Batching does not make a feature vector fixed, so branch prediction was never the mechanism; and 1.35x was not the size of the branch effect either, because that benchmark cycles only 512 vectors and the predictor memorises the resulting path set.
+Four prototypes across seven pool sizes put the best variant at 1.04x to 1.12x while the paths are memorisable and **0.85x to 0.91x once they are not**, which is the regime the live cache runs in.
+The numbers and the controls are in [Batching the eight candidates into one pass, which does not work](docs/03-performance.md#batching-the-eight-candidates-into-one-pass-which-does-not-work).
+
+So the 74% stands, and what is left of it are the expensive options rather than the cheap ones: fewer trees, a shallower fit, a smaller `CACHE_SAMPLE_SIZE`, or a different model class.
+Each of those trades hit ratio for latency, so none is a free win and none should be taken without the origin-latency curve below.
 
 **The Belady boundary must be at least one second, and the documented default is unusable.**
 `ModelMeta.boundary_seconds` is whole seconds, the registry rejects zero, and a cache node refuses any model whose boundary disagrees with its own `MODEL_BOUNDARY`.

@@ -85,8 +85,16 @@ Apple M4, `darwin/arm64`, 2026-09-14, with no containers running.
 | `model/Raw` 200 trees, 64 leaves | 1038 ns/op, 8305 ns/eviction | 0 |
 | `model/RawVaryingFeatures` 13 trees, one hot vector | 44.61 ns/op, 356.8 ns/eviction | 0 |
 | `model/RawVaryingFeatures` 13 trees, 512 vectors | 60.07 ns/op, 480.6 ns/eviction | 0 |
+| `model/RawVectorPool` 13 trees, 512 vectors | 62.05 ns/op, 496.4 ns/eviction, 0.955 ns/nodevisit | 0 |
+| `model/RawVectorPool` 13 trees, 2048 vectors | 151.9 ns/op, 1215 ns/eviction, 2.34 ns/nodevisit | 0 |
+| `model/RawVectorPool` 13 trees, 8192 vectors | 215.0 ns/op, 1720 ns/eviction, 3.31 ns/nodevisit | 0 |
+| `model/RawVectorPool` 13 trees, 262144 vectors | 236.6 ns/op, 1893 ns/eviction, 3.64 ns/nodevisit | 0 |
+| `model/RawVectorPool/rowsonly` 13 trees, any pool size | 43.1 to 44.1 ns/op, flat | 0 |
 | `model/Load` 100 trees | 1.26 ms/op, 263 MB/s | 2346 |
 | `belady/MINHitRatio` 200k requests, 100k keys, 10k capacity | 13.8 ms/op | 208k |
+
+The `model/RawVectorPool` rows are medians of five runs at `-benchtime=2s` rather than the single `make bench-micro` pass, because the effect they measure spans 3.8x and the run-to-run spread on a laptop is a few percent.
+The command is in [Reading the model numbers](#reading-the-model-numbers) below.
 
 The 3 allocations per op reported by `Evict/*` are the benchmark's own `fmt.Sprintf` and the value slice, not the policy.
 `model/Load` allocates freely on purpose: it runs off the request path, once per model version, and 1.3 ms to parse a 100-tree dump is not a number worth optimising.
@@ -109,15 +117,54 @@ That 1.55x is working set and concurrency, and it is charged to every policy, wh
 The `ns/eviction` column on `model/Raw` is the per-evaluation cost times 8, the default sample size.
 A 50-tree, 32-leaf model therefore costs about 1.5 µs per eviction in evaluation alone, which is over the budget.
 
-`RawVaryingFeatures` is the same measurement with a different feature vector per call, and it is the honest one.
-A tree walk is a chain of data-dependent branches, so evaluating one hot vector in a loop lets the branch predictor learn the entire walk.
-Nothing live is predictable that way: eight candidates per eviction, each with its own recency, size and access history.
-The difference is 1.35x, and every `model/Raw` row above understates its model by about that much.
+Every `model/Raw` row evaluates **one** feature vector in a loop, so read all of them as a floor.
+The rest of this section is about how far below the real cost that floor sits, and the answer turned out to be up to 3.8x.
 
-The fit measured in the pass below is 13 trees at `num_leaves=32`, which costs **about 0.5 µs per eviction** in evaluation with varying features.
-So the sub-microsecond budget holds for the model that gets trained, with roughly half the budget left, and it is exceeded somewhere above 25 trees.
-That is a real constraint on the trainer, not a theoretical one: `MAX_ROUNDS` is 300 with early stopping at 25, and the only reason the fitted model is small is that early stopping fires.
-A workload that needed 200 trees would need either a smaller `CACHE_SAMPLE_SIZE` or a different story about the budget.
+`RawVaryingFeatures` is the same measurement with a different feature vector per call.
+A tree walk is a chain of data-dependent branches, so evaluating one hot vector in a loop lets the branch predictor learn the entire walk, and nothing live is predictable that way.
+The 1.35x it reports **is not the size of that effect**, and this document said it was until `RawVectorPool` was written to check.
+
+`RawVaryingFeatures` cycles 512 distinct vectors, and 512 vectors through 13 trees is 6656 root-to-leaf paths, which is a set small enough to memorise.
+Growing only the pool, with the model and the loop unchanged, takes 13 trees from 0.955 to 3.64 ns per node visit:
+
+```sh
+go test ./internal/model/ -run '^$' -bench RawVectorPool -benchtime=2s -count=5   # medians in the table
+```
+
+So the whole range spanned by branch predictability is **3.8x**, not 1.35x, and 60.07 ns/op is barely above the bottom of it.
+
+**It is not the rows going cold**, which is the only other explanation available and would make the finding an artefact of the benchmark's own footprint.
+The `rowsonly` control walks the identical pool at the identical stride and touches one float from each row, so it pays the same line fetch, while evaluating a fixed vector.
+It is **flat at about 43.6 ns/op from 32 KiB of rows to 16 MiB**, against 62.05 to 236.6 for the real loop.
+Sixteen `float32` is one 64-byte line and the walk is sequential, so hardware prefetch covers it and there is nothing left for memory to explain.
+`darwin/arm64` exposes no branch-mispredict counter, so naming the mechanism is still inference; ruling out the alternative is not.
+
+### What the model actually costs, which is a range
+
+Neither end of that sweep is the live cost, and the reason is worth stating rather than picking one.
+
+What the predictor memorises is the **path**, not the vector.
+Two evictions that sample the same entry a millisecond apart take the same path through most trees, because `recency_ms` moving by one millisecond crosses almost no thresholds.
+A shard at live shape holds a few hundred to a few thousand entries and eviction samples eight of them, so the live path set is bounded by the shard population rather than being unbounded.
+That puts the live cost between the two ends rather than at either:
+
+| For 13 trees at `num_leaves=32`, 8 candidates | Model cost per eviction |
+| --- | --- |
+| Lower bound, a fully memorisable path set | 0.50 µs |
+| Upper bound, no path ever repeated | 1.89 µs |
+
+Both figures come from `synth`, which builds **complete** trees, so 32 leaves means exactly 5 node visits per tree.
+LightGBM grows leaf-wise, so a real `num_leaves=32` tree is unbalanced and its mean path can be longer than 5.
+The upper bound is therefore an upper bound on this shape, not on the fit.
+
+The honest reading is that **the sub-microsecond eviction budget is not established by these microbenchmarks in either direction.**
+It holds at the memorisable end and fails by about 2x at the other, and where a given workload sits depends on how much path repetition its shard population produces, which nothing here measures.
+The earlier claim that the budget held "with roughly half the budget left" came from reading the lower bound as the honest figure.
+
+Everything else that followed from that claim moves with it.
+25 trees was described as roughly the full microsecond for eight candidates; at the upper bound the ceiling is nearer **7 trees**, and the 41-tree fits the trainer has produced on this workload are then over budget by 6x rather than by 2x.
+That sharpens an existing constraint rather than creating one: `MAX_ROUNDS` is 300 with early stopping at 25, and the only reason a fitted model is ever small is that early stopping fires.
+A workload needing 200 trees needs a smaller `CACHE_SAMPLE_SIZE` or a different story about the budget, and on this evidence so does one needing 41.
 
 ## Measured cluster numbers
 
@@ -166,7 +213,7 @@ Turning that observation into a curve, hit ratio and throughput against origin l
 
 ### The gap between the microbenchmark and the live number
 
-This started as "two orders of magnitude, unexplained", became 7x after the microbenchmark's model size was corrected, and is now accounted for to within about 1.4x.
+This started as "two orders of magnitude, unexplained", became 7x after the microbenchmark's model size was corrected, then closed to about 1.4x, and the live figure now falls **inside** a predicted range rather than beside a predicted point.
 
 The reason it stayed open so long is worth more than the number.
 Every attempt to explain it looked at the learned policy's eviction cost and asked what the model was doing.
@@ -178,8 +225,11 @@ Four factors, each measured rather than argued:
 | --- | --- | --- |
 | Container, three nodes, eight shared cores | `EvictLiveShape/lru` 296.6 ns/victim native, LRU 1867 ns/victim live, identical work | 6.3x |
 | Working set and concurrency | `Evict/lru` 191.3 ns/victim, `EvictLiveShape/lru` 296.6 ns/victim | 1.55x |
-| Branch predictability in the tree walk | `RawVaryingFeatures` hot 44.61 ns/op, varying 60.07 ns/op | 1.35x |
+| Branch predictability in the tree walk | `RawVectorPool` 0.955 ns/nodevisit at 512 vectors, 3.64 at 262144, `rowsonly` flat | 3.8x |
 | Windowing the counter instead of reading a lifetime mean | `Evict/lru` 195 → 191.3 ns/victim | 1.02x |
+
+The third row was recorded as 1.35x from `RawVaryingFeatures` and is the one number a later pass changed by a large factor.
+It is also the only one of the four that is a **range** rather than a point, which is why the prediction below became a range too.
 
 Rebuilt prediction for the model this pass actually trained, all from the microbenchmark table:
 
@@ -187,14 +237,18 @@ Rebuilt prediction for the model this pass actually trained, all from the microb
 | --- | --- |
 | Sampling 8 candidates at live shape, LRU baseline | 297 ns |
 | Feature extraction plus one tree, 8 candidates | 191 ns, from the `EvictLiveShape` lrb-lru difference |
-| Model evaluation, remaining 12 of 13 trees, varying features | 444 ns |
-| **Predicted, native** | **~930 ns/victim** |
-| **Predicted, live**, applying the 6.3x environment factor | **~5.9 µs/victim** |
+| Model evaluation, remaining 12 of 13 trees, memorisable path set | 458 ns |
+| Model evaluation, remaining 12 of 13 trees, no path repeated | 1747 ns |
+| **Predicted, native** | **946 to 2235 ns/victim** |
+| **Predicted, live**, applying the 6.3x environment factor | **6.0 to 14.1 µs/victim** |
 | **Measured live** | **8.3 µs/victim** |
 
-A 1.4x residual, against 7x before.
-It is not decomposed further, and the honest reading is that the 6.3x environment factor was derived from LRU, whose cost is dominated by memory latency, while model evaluation is compute and branch bound.
-There is no reason those two should scale identically under CPU oversubscription, and 1.4x is about the size of that mismatch.
+The measurement lands inside that bracket, about a fifth of the way up it, so there is no residual left to attribute.
+That is a weaker claim than the 1.4x it replaces, and a truer one: the previous pass had a point prediction only because it read the memorisable end of the pool sweep as the model's cost, and a residual it then explained by arguing that the LRU-derived 6.3x should not apply cleanly to branch-bound work.
+
+That argument may still be right, and it is no longer needed.
+Where the live figure sits inside the bracket is itself the more informative result: near the bottom, which is what the shard-population argument predicts.
+Eviction samples eight entries from a shard holding a few hundred to a few thousand, and a sampled entry's path through the trees barely moves between two evictions milliseconds apart, so the live path set is closer to memorisable than to fresh.
 
 ### What was ruled out
 
@@ -224,6 +278,46 @@ It is not an independent data point, but the direction of both differences is in
 That figure was 11,781 before this pass, and the change is the counter rather than the machine.
 `evict_ns_mean` was a lifetime mean, so the model-loaded replay's evictions were averaged together with the cheap fallback evictions of the replay that captured the trace.
 Windowing it over the measured interval raised the number by 2.5x, which is the clearest single argument for the change: the old figure was not a smaller measurement of the same thing, it was a measurement of a different thing.
+
+### Batching the eight candidates into one pass, which does not work
+
+That 74% names the tree walk as the only target worth touching, and the obvious change is to score all eight sampled candidates in one pass over the trees instead of eight separate `Raw` calls.
+The candidates are entirely independent, and each walk is a chain of two dependent loads per level: the node, then the feature the node names, whose address depends on the first load.
+Interleaving should hand the load unit several chains at once.
+
+Four prototypes were written in the test file and measured before anything touched `internal/cache`: tree-outer with candidate-inner, level-lockstep over a fixed `[8]int32`, and hand-unrolled scalar locals at widths 4 and 8.
+They are in commit `a867f09` and were then removed, because at the live shape of 13 trees and a batch of 8 the best of them was **1.04x to 1.09x**, against a stopping rule that wanted 1.20x.
+
+Sweeping tree count looked briefly like a reason to ship anyway, and then failed to reproduce.
+Three runs of the same command gave the best variant at 25 trees as 2.13x, 1.90x and 1.15x, and one run had `seq` winning at 41, 50 and 100 trees while another had it losing at all three.
+That sweep rebuilds a model per shape, so a 100-tree model's node array is about 100 KiB and leaves L1 while a 13-tree model's 6.4 KiB does not, but a spread that wide between runs of one command is machine noise and no amount of interpretation fixes it.
+**Nothing in this section rests on it.**
+
+Holding the model at 13 trees and growing only the vector pool does reproduce, across runs and in sign:
+
+| Vector pool | 8 sequential `Raw` calls | Best batched variant | Ratio |
+| --- | --- | --- | --- |
+| 512 | 501.1 ns | 481.5 ns | 1.041x |
+| 1024 | 613.8 ns | 546.4 ns | 1.123x |
+| 2048 | 1289 ns | 1202 ns | 1.072x |
+| 4096 | 1644 ns | 1659 ns | 0.991x |
+| 8192 | 1743 ns | 2046 ns | 0.852x |
+| 32768 | 1979 ns | 2173 ns | 0.911x |
+| 262144 | 1931 ns | 2202 ns | 0.877x |
+
+```sh
+git stash && git checkout a867f09 -- internal/model/rawbatch_test.go
+go test ./internal/model/ -run '^$' -bench BenchmarkRawBatchVectorPool -count=7   # medians above
+```
+
+**Once the branches are genuinely unpredictable, batching is 9 to 15% slower.**
+Every apparent win was measured in the regime where the predictor was doing the work, and the live cache is not in that regime.
+
+Two things that were true before the measurement and stayed true: `ROADMAP.md` used to attribute the opportunity to the 1.35x hot-versus-varying gap, which was never the mechanism, because batching does not make a feature vector fixed.
+And the arithmetic said the win would be small before any of this ran: 60.07 ns/op over 65 node visits is about 3 cycles per visit on an M4, which a strictly serial two-load chain cannot reach, so `Raw` was already overlapping roughly three chains and batching could only deepen parallelism that was partly present.
+
+`internal/cache/lrb.go` and `internal/model/model.go` are therefore unchanged.
+What the pass produced instead is the pool sweep above, which is worth more than a win of a few percent in a component that costs 0.7 µs per request against a 1.84 ms p50.
 
 ### What the earlier pass could not have been
 
