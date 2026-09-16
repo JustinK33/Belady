@@ -17,6 +17,17 @@ COMPOSE_DEV ?= docker compose -f deploy/compose.yaml -f deploy/compose.dev.yaml 
 COMPOSE_MIN ?= docker compose -f deploy/compose.min.yaml $(COMPOSE_FLAGS)
 SERVICES := gateway cachenode registry origin loadgen
 
+# Compose reads .env, and a recipe's own shell does not, so a target that prints where
+# a service landed has to source it or it prints the default port at someone who moved
+# it. Sourcing is best-effort: a missing .env just means the defaults are correct.
+LOAD_ENV := set -a; [ -f .env ] && . ./.env; set +a
+
+# loadgen runs on the host and dials the gateway's published port, which .env can move
+# to dodge a clash. Asking Compose where it actually landed beats trusting a second
+# copy of the number in TARGET_ADDR, which is how a perfectly healthy cluster comes to
+# answer `make bench` with "connection refused". An explicit TARGET_ADDR still wins.
+GATEWAY_ADDR = TARGET_ADDR="$${TARGET_ADDR:-localhost:$$($(COMPOSE) port gateway 8080 | sed 's/.*://')}"
+
 # Pinned so a local run and CI report the same findings. A newer staticcheck finds
 # things an older one does not, which shows up as a red build on a green working tree.
 # The same version is pinned in .github/workflows/ci.yml; move both together.
@@ -83,10 +94,11 @@ proto-check: proto ## Fail if generated stubs are stale
 up: ## Bring up the cluster
 	$(COMPOSE) up -d --build
 	@$(MAKE) --no-print-directory wait
-	@echo "gateway     localhost:$${GATEWAY_PORT:-8080} (grpc)"
-	@echo "registry    localhost:$${REGISTRY_PORT:-8082} (grpc)"
-	@echo "prometheus  http://localhost:$${PROMETHEUS_PORT:-9091}"
-	@echo "grafana     http://localhost:$${GRAFANA_PORT:-3000}"
+	@$(LOAD_ENV); \
+	 echo "gateway     localhost:$${GATEWAY_PORT:-8080} (grpc)"; \
+	 echo "registry    localhost:$${REGISTRY_PORT:-8082} (grpc)"; \
+	 echo "prometheus  http://localhost:$${PROMETHEUS_PORT:-9091}"; \
+	 echo "grafana     http://localhost:$${GRAFANA_PORT:-3000}"
 
 .PHONY: up-dev
 up-dev: ## Bring up the cluster with host-visible traces, models and node ports
@@ -104,8 +116,9 @@ up-min: ## Bring up a single cache node behind the gateway's HTTP API
 	  exit 2; }
 	$(COMPOSE_MIN) up -d --build
 	@./scripts/wait-for-health.sh gateway
-	@echo "http  localhost:$${GATEWAY_HTTP_PORT:-8090}  (bearer token required)"
-	@echo "grpc  localhost:$${GATEWAY_PORT:-8080}"
+	@$(LOAD_ENV); \
+	 echo "http  localhost:$${GATEWAY_HTTP_PORT:-8090}  (bearer token required)"; \
+	 echo "grpc  localhost:$${GATEWAY_PORT:-8080}"
 
 .PHONY: down-min
 down-min: ## Tear down the minimal stack
@@ -129,7 +142,11 @@ images: ## Build the container images without starting anything
 
 .PHONY: bench
 bench: ## Replay a workload against the running cluster and report hit ratio
-	$(GO) run ./cmd/loadgen
+	@$(GATEWAY_ADDR) $(GO) run ./cmd/loadgen
+
+.PHONY: bench-sweep
+bench-sweep: ## Replay at a range of origin latencies and chart both policies
+	./scripts/origin-latency-sweep.sh
 
 .PHONY: train
 train: ## Train a model from a captured trace and publish it
