@@ -249,7 +249,10 @@ func main() {
 
 	// The learned policy is the only one that needs a model, so the registry
 	// connection follows the policy rather than being wired up unconditionally.
-	boundary := config.Duration("MODEL_BOUNDARY", 10*time.Minute)
+	// MustDuration, not Duration: this value has to match the trainer's exactly or
+	// every model is refused, so falling back to the default on a typo would trade a
+	// startup failure for a node that serves the fallback policy forever.
+	boundary := config.MustDuration("MODEL_BOUNDARY", 10*time.Minute)
 	if models != nil {
 		addr := config.String("REGISTRY_ADDR", "")
 		if addr == "" {

@@ -41,6 +41,25 @@ func Duration(key string, def time.Duration) time.Duration {
 	return parse(key, def, time.ParseDuration)
 }
 
+// MustDuration exits if the key is set but unparseable, rather than falling back
+// the way Duration does. Use it for a duration that another component has to
+// agree on, where a fallback is worse than a refusal: MODEL_BOUNDARY is the case
+// this exists for, because a node that quietly reverts to the default boundary
+// refuses every model it is offered and serves the fallback policy instead, which
+// looks exactly like a healthy node from outside.
+func MustDuration(key string, def time.Duration) time.Duration {
+	raw, ok := os.LookupEnv(key)
+	if !ok || raw == "" {
+		return def
+	}
+	v, err := time.ParseDuration(raw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config: %s=%q is not a duration: %v (want e.g. 30s, 10m, 1h30m)\n", key, raw, err)
+		os.Exit(2)
+	}
+	return v
+}
+
 func Float(key string, def float64) float64 {
 	return parse(key, def, func(s string) (float64, error) { return strconv.ParseFloat(s, 64) })
 }
@@ -111,7 +130,8 @@ func ParseBytes(s string) (int64, error) {
 }
 
 // parse falls back to the default and warns rather than exiting: a typo in an
-// optional tuning knob should not take a cache node out of rotation.
+// optional tuning knob should not take a cache node out of rotation. A value that
+// is not an optional tuning knob wants MustString or MustDuration instead.
 func parse[T any](key string, def T, fn func(string) (T, error)) T {
 	raw, ok := os.LookupEnv(key)
 	if !ok || raw == "" {

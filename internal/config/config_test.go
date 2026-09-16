@@ -1,6 +1,10 @@
 package config
 
 import (
+	"errors"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -60,5 +64,45 @@ func TestDefaultsAndOverrides(t *testing.T) {
 	got := Strings("BELADY_TEST_LIST", nil)
 	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
 		t.Errorf("Strings = %q, want [a b]", got)
+	}
+}
+
+func TestMustDuration(t *testing.T) {
+	if got := MustDuration("BELADY_ABSENT_KEY", time.Second); got != time.Second {
+		t.Errorf("MustDuration default = %v, want 1s", got)
+	}
+
+	t.Setenv("BELADY_TEST_MUST_DUR", "90s")
+	if got := MustDuration("BELADY_TEST_MUST_DUR", time.Second); got != 90*time.Second {
+		t.Errorf("MustDuration override = %v, want 90s", got)
+	}
+}
+
+// TestMustDurationExitsOnAMalformedValue re-execs this test binary, because the
+// whole point of MustDuration is os.Exit and there is no way to observe that from
+// inside the process. The distinction from Duration's warn-and-fall-back is the
+// only reason MustDuration exists, so it needs a test that actually sees the exit.
+func TestMustDurationExitsOnAMalformedValue(t *testing.T) {
+	if os.Getenv("BELADY_TEST_MUST_DUR_CHILD") == "1" {
+		MustDuration("BELADY_TEST_MUST_DUR", time.Second)
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestMustDurationExitsOnAMalformedValue")
+	cmd.Env = append(os.Environ(),
+		"BELADY_TEST_MUST_DUR_CHILD=1",
+		"BELADY_TEST_MUST_DUR=ten minutes",
+	)
+	out, err := cmd.CombinedOutput()
+
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		t.Fatalf("child exited with %v, want a non-zero exit; output:\n%s", err, out)
+	}
+	if exit.ExitCode() != 2 {
+		t.Errorf("child exit code = %d, want 2; output:\n%s", exit.ExitCode(), out)
+	}
+	if !strings.Contains(string(out), "BELADY_TEST_MUST_DUR") {
+		t.Errorf("child stderr does not name the offending key:\n%s", out)
 	}
 }

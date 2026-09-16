@@ -45,6 +45,9 @@ No config files, so an image can never carry a secret, and `.env.example` docume
 `internal/config` has one rule worth knowing: a missing **required** value exits with status 2, and a **malformed** value warns and falls back to the default.
 A typo in `CACHE_SHARDS` must not take a node out of rotation; a missing `CACHE_NODES` must.
 
+`MODEL_BOUNDARY` is the one exception, and it exits 2 when it is set to something unparseable.
+It is not a tuning knob: it has to match the trainer's value exactly, so a node that quietly fell back to the default would refuse every model it was offered and serve the fallback policy while looking healthy from outside.
+
 Byte sizes accept `b`, `k`/`kb`/`kib`, `m`/`mb`/`mib`, `g`/`gb`/`gib`, `t`/`tb`/`tib`.
 Durations are Go duration strings: `250ms`, `30s`, `10m`, `1h30m`.
 
@@ -62,7 +65,7 @@ Durations are Go duration strings: `250ms`, `30s`, `10m`, `1h30m`.
 | `CACHE_SHARDS` | `256` | Rounded **up** to a power of two |
 | `CACHE_SAMPLE_SIZE` | `8` | Eviction candidates drawn per victim |
 | `CACHE_DEFAULT_TTL` | `0` | `0` means entries leave only by eviction or `Delete` |
-| `MODEL_BOUNDARY` | `10m` | Must match the model's `boundary_seconds` or the model is refused |
+| `MODEL_BOUNDARY` | `10m` | Must match the model's `boundary_seconds` or the model is refused. Whole seconds, at least `1s`. A malformed value is fatal, unlike every other knob |
 | `TRACE_ENABLED` | `false` | Compose turns it on for the full stack |
 | `TRACE_DIR` | `/var/lib/belady/traces` | |
 | `TRACE_SAMPLE_DENOMINATOR` | `16` | One key in N, by key hash |
