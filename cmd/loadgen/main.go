@@ -157,6 +157,12 @@ type results struct {
 	served    int
 	fromCache int
 	bytes     int64
+
+	// Latency totals split by whether the gateway answered from cache, which is what
+	// makes the marginal cost of a miss a measured quantity rather than an assumed
+	// one. It is not the configured ORIGIN_LATENCY: a miss also pays gRPC out to the
+	// origin and back.
+	hitNS, missNS int64
 }
 
 func replay(ctx context.Context, client beladyv1.CacheClient, trace []string, concurrency int) (*results, error) {
@@ -207,6 +213,9 @@ func replay(ctx context.Context, client beladyv1.CacheClient, trace []string, co
 			res.bytes += int64(sm.bytes)
 			if sm.fromCache {
 				res.fromCache++
+				res.hitNS += sm.latency.Nanoseconds()
+			} else {
+				res.missNS += sm.latency.Nanoseconds()
 			}
 		}
 	}
@@ -306,6 +315,8 @@ func report(opts options, trace []string, res *results, sd serverDelta, elapsed 
 	}
 
 	fmt.Printf("\nclient latency\n")
+	row("mean", fmt.Sprintf("%s (hit %s, miss %s, marginal %s)",
+		res.mean(), res.meanHit(), res.meanMiss(), res.meanMiss()-res.meanHit()))
 	row("p50", res.quantile(0.50).String())
 	row("p90", res.quantile(0.90).String())
 	row("p99", res.quantile(0.99).String())
@@ -313,6 +324,28 @@ func report(opts options, trace []string, res *results, sd serverDelta, elapsed 
 	row("max", res.quantile(1).String())
 	row("throughput", fmt.Sprintf("%.0f req/s, %s/s", float64(res.served)/elapsed.Seconds(), bytes(uint64(float64(res.bytes)/elapsed.Seconds()))))
 	fmt.Println()
+}
+
+// meanMiss minus meanHit is the marginal cost of a miss, which is the quantity the
+// break-even arithmetic in docs/03-performance.md is expressed in. Reporting it
+// beside the percentiles is what turns "is a learned policy worth it here" into a
+// comparison against a number rather than against the origin's configured latency.
+//
+// ponytail: mean-field, not causal. At concurrency 64 a slow miss also delays the
+// hits queued behind it, so part of the miss cost is charged to the hits and the
+// difference understates one miss in isolation. The upgrade is an open-loop
+// generator at a fixed arrival rate, which removes the coupling; until then the
+// check that it is credible is that the difference tracks ORIGIN_LATENCY with a
+// slope near 1.
+func (r *results) mean() time.Duration     { return meanOf(r.hitNS+r.missNS, r.served) }
+func (r *results) meanHit() time.Duration  { return meanOf(r.hitNS, r.fromCache) }
+func (r *results) meanMiss() time.Duration { return meanOf(r.missNS, r.served-r.fromCache) }
+
+func meanOf(total int64, n int) time.Duration {
+	if n <= 0 {
+		return 0
+	}
+	return (time.Duration(total) / time.Duration(n)).Round(time.Microsecond)
 }
 
 // quantile reads straight off the sorted samples. Every latency is kept rather
