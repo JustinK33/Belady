@@ -33,7 +33,6 @@ func newTraceCache(t *testing.T, shards int) (*Cache, *trace.Recorder, string) {
 		Nanos:         func() int64 { return 0 },
 		CapacityBytes: 1 << 20,
 		Shards:        shards,
-		SampleSize:    5,
 		Trace:         rec,
 	})
 	if err != nil {

@@ -37,11 +37,6 @@ type Config struct {
 	CapacityBytes int64
 	// Shards is rounded up to a power of two so shard selection is a mask.
 	Shards int
-	// SampleSize is how many candidates a sampled policy scores per eviction.
-	// Five is Redis's default and is already within a couple of percent of exact
-	// LRU; the learned policy benefits from more, because a better score function
-	// deserves a wider search.
-	SampleSize int
 }
 
 type Cache struct {
@@ -143,9 +138,6 @@ func New(cfg Config) (*Cache, error) {
 	if cfg.Shards <= 0 {
 		cfg.Shards = 256
 	}
-	if cfg.SampleSize <= 0 {
-		cfg.SampleSize = 5
-	}
 	if cfg.NowUS == nil {
 		cfg.NowUS = func() int64 { return time.Now().UnixMicro() }
 	}
@@ -175,7 +167,7 @@ func New(cfg Config) (*Cache, error) {
 		if cfg.Trace != nil {
 			ring = cfg.Trace.Ring(i)
 		}
-		c.shards[i] = newShard(per, cfg.SampleSize, cfg.NewPolicy(per), cfg.Nanos, ring)
+		c.shards[i] = newShard(per, cfg.NewPolicy(per), cfg.Nanos, ring)
 	}
 	return c, nil
 }

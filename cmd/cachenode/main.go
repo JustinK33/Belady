@@ -218,7 +218,6 @@ func main() {
 		NewPolicy:     mkPolicy,
 		CapacityBytes: capacity,
 		Shards:        shards,
-		SampleSize:    config.Int("CACHE_SAMPLE_SIZE", 8),
 		DefaultTTL:    defaultTTL,
 		Trace:         recorder,
 	})

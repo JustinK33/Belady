@@ -51,6 +51,11 @@ type sampled struct {
 	found     bool
 }
 
+// newSampled takes the candidate count rather than defaulting one, because the
+// sample size is a policy decision and every constructor is reached from one place
+// that reads CACHE_SAMPLE_SIZE. Five is Redis's default and is already within a
+// couple of percent of exact LRU; the learned policy benefits from more, because a
+// better score function deserves a wider search, which is why the default is 8.
 func newSampled(name string, n int, score func(*Entry, int64) float64) *sampled {
 	p := &sampled{name: name, n: n, score: score}
 	p.visit = p.consider

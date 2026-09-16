@@ -23,7 +23,6 @@ func newTestCache(t *testing.T, capacity int64, shards int, policy func(int64) P
 		Nanos:         func() int64 { return 0 },
 		CapacityBytes: capacity,
 		Shards:        shards,
-		SampleSize:    5,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

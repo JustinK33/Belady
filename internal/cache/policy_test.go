@@ -200,7 +200,7 @@ func BenchmarkGetHit(b *testing.B) {
 func TestEvictionDoesNotAllocate(t *testing.T) {
 	for name, mk := range policies {
 		t.Run(name, func(t *testing.T) {
-			s := newShard(1<<20, 8, mk(1<<20), func() int64 { return 0 }, nil)
+			s := newShard(1<<20, mk(1<<20), func() int64 { return 0 }, nil)
 			for i := range 2048 {
 				s.insert(uint64(i), make([]byte, 256), int64(i)*1000, 0, false)
 			}

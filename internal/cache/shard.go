@@ -26,7 +26,6 @@ type shard struct {
 
 	used     int64
 	capacity int64
-	sample   int
 
 	// Counters live here rather than in the Cache so the hot path never touches a
 	// shared atomic. They are guarded by mu, which the caller already holds.
@@ -40,14 +39,13 @@ type shard struct {
 	mu sync.Mutex
 }
 
-func newShard(capacity int64, sample int, policy Policy, nanos func() int64, ring *trace.Ring) *shard {
+func newShard(capacity int64, policy Policy, nanos func() int64, ring *trace.Ring) *shard {
 	return &shard{
 		m:        make(map[uint64]*Entry),
 		policy:   policy,
 		nanos:    nanos,
 		ring:     ring,
 		capacity: capacity,
-		sample:   sample,
 	}
 }
 
