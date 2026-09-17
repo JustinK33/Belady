@@ -151,6 +151,70 @@ func TestStatsRatios(t *testing.T) {
 	}
 }
 
+// TestEvictionTimingIsAccountedPerVictim covers the pair the break-even arithmetic in
+// docs/03-performance.md rests on: EvictNS over EvictSample is the cost of choosing one
+// victim. Nothing covered it before, because newTestCache pins Nanos to zero, so the
+// whole accumulation could have been dropping samples and every test would still pass.
+//
+// The second half pins why EvictNS/EvictSample is interchangeable with a per-eviction
+// cost, which is what lets that figure be multiplied by evictions-per-request. evictOne
+// counts a sample unconditionally but an eviction only on success, so the two could
+// drift. They cannot: insert rejects an oversized object before entering the eviction
+// loop, so the loop only runs when a victim is guaranteed to exist.
+func TestEvictionTimingIsAccountedPerVictim(t *testing.T) {
+	// Each evictOne reads the clock twice, so one eviction costs exactly one tick.
+	const tick = 500
+	var reads int64
+	clk := &fakeClock{}
+	c, err := New(Config{
+		NewPolicy:     func(int64) Policy { return NewLRU(5) },
+		NowUS:         clk.nowUS,
+		Nanos:         func() int64 { reads++; return reads * tick },
+		CapacityBytes: 1000,
+		Shards:        1,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Ten 100-byte objects fill it, so the next five each evict one.
+	for i := range 15 {
+		c.Admit(fmt.Sprintf("k%d", i), make([]byte, 100))
+	}
+
+	st := c.Snapshot()
+	if st.Evictions != 5 {
+		t.Fatalf("Evictions = %d, want 5", st.Evictions)
+	}
+	if st.EvictSample != st.Evictions {
+		t.Errorf("EvictSample = %d, Evictions = %d: want equal while Rejections is 0",
+			st.EvictSample, st.Evictions)
+	}
+	if want := uint64(5 * tick); st.EvictNS != want {
+		t.Errorf("EvictNS = %d, want %d", st.EvictNS, want)
+	}
+	if st.EvictNSMean != tick {
+		t.Errorf("EvictNSMean = %d, want %d", st.EvictNSMean, tick)
+	}
+
+	// An object larger than the whole shard is rejected without thrashing it, so it
+	// charges nothing to either eviction counter and the two stay in step.
+	if c.Admit("huge", make([]byte, 2000)) {
+		t.Fatal("Admit of an oversized object succeeded")
+	}
+	st = c.Snapshot()
+	if st.Rejections == 0 {
+		t.Fatal("Rejections = 0 after an oversized Admit")
+	}
+	if st.EvictSample != st.Evictions {
+		t.Errorf("EvictSample = %d, Evictions = %d: a rejection must not charge a victim search",
+			st.EvictSample, st.Evictions)
+	}
+	if want := uint64(5 * tick); st.EvictNS != want {
+		t.Errorf("EvictNS = %d after a rejection, want %d unchanged", st.EvictNS, want)
+	}
+}
+
 func TestShardsAreRoundedToPowerOfTwo(t *testing.T) {
 	c := newTestCache(t, 1<<20, 100, func(int64) Policy { return NewLRU(5) })
 	if len(c.shards) != 128 {
