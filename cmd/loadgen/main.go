@@ -389,8 +389,16 @@ type record struct {
 	Keyspace    int     `json:"keyspace"`
 	ZipfS       float64 `json:"zipf_s"`
 
-	ObjectHit           float64 `json:"object_hit"`
-	ByteHit             float64 `json:"byte_hit"`
+	ObjectHit float64 `json:"object_hit"`
+	ByteHit   float64 `json:"byte_hit"`
+	// ClientHit is the same quantity counted on the other side of the wire: the
+	// fraction of responses the gateway marked as served from cache, rather than the
+	// nodes' own shard counters. The text report cross-checks these two; carrying it
+	// in the JSON is what lets a sweep do the same without re-deriving it from the
+	// hit and miss means. They disagree when routing or stats aggregation is broken,
+	// which is a class of bug that leaves the hit ratio looking entirely plausible.
+	ClientHit float64 `json:"client_hit"`
+
 	BeladyMIN           float64 `json:"belady_min"`
 	Evictions           uint64  `json:"evictions"`
 	Rejections          uint64  `json:"rejections"`
@@ -423,6 +431,7 @@ func reportJSON(opts options, res *results, sd serverDelta, d derived, elapsed t
 
 		ObjectHit:           round4(d.objectHit),
 		ByteHit:             round4(d.byteHit),
+		ClientHit:           round4(ratio(uint64(res.fromCache), uint64(res.served))),
 		BeladyMIN:           round4(d.optimum),
 		Evictions:           sd.evictions,
 		Rejections:          sd.rejections,

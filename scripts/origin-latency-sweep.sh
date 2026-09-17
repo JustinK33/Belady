@@ -174,6 +174,17 @@ run_one() {
     exit 1
   fi
 
+  # The hit ratio is counted twice over: by the nodes' shard counters and by the client
+  # reading which source answered. Every conclusion here is a difference of two hit
+  # ratios a few tens of basis points apart, so a systematic gap between those two
+  # counts is large enough to invent one. 50 bp is loose enough for the 4-decimal
+  # rounding on both fields and tight enough to catch a real disagreement.
+  if ! jq -e '(.object_hit - .client_hit | fabs) < 0.005' <<<"$row" >/dev/null; then
+    echo "FAIL server and client disagree on the hit ratio: $(jq -c '{object_hit, client_hit}' <<<"$row")" >&2
+    echo "     One of routing, stats aggregation or the source flag is wrong, so this row is not a policy measurement." >&2
+    exit 1
+  fi
+
   printf '%s\n' "$row" >>"$OUT"
 }
 
