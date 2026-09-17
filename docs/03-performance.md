@@ -249,6 +249,11 @@ Below 200 µs the local slope is 2.4 to 3.5, which is not the origin misbehaving
 It is the queue draining: a cheaper miss means fewer misses outstanding at once, so each one waits behind less work, and the floor falls from 730 µs to 397 µs as the configured latency goes to zero.
 That is the closed loop showing up in the one quantity this sweep can measure cleanly, and it is the same coupling the marker on `results.mean` in `cmd/loadgen/main.go` names.
 
+That 397 µs floor is a property of `CONCURRENCY=64`, not of the cache.
+Little's Law holds on this data to within 1% at four of the five points and 4% at 20 ms, which is what a closed loop with 64 workers is supposed to do, and the mean latency of a *hit* at a zero-latency origin is 2100 µs, three orders of magnitude above the work a hit performs.
+So the absolute latencies here are transport and queueing almost end to end, and the split between the two inside that 397 µs is not measured: 64 was chosen to keep three nodes busy for a hit-ratio comparison, and it silently sets the queueing term in every latency number that followed.
+A concurrency sweep at one fixed origin latency would separate them, and until that exists the break-even below should be read as "this deployment at this concurrency", not as a property of the stack.
+
 #### What the policy costs
 
 | `ORIGIN_LATENCY` | LRU evict | LRB evict | Evictions/request | Spent per request |

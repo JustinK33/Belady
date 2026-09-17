@@ -158,6 +158,7 @@ A worker that misses stops issuing requests until the miss resolves, so origin l
 The same coupling makes mean latency roughly `concurrency / throughput`, so the 17% throughput spread reappears as latency noise and neither can be measured independently of the other.
 Issuing at a configured rate regardless of how fast responses come back fixes both, and it changes what a run reports: a fixed arrival rate can exceed what the cluster can serve, so the output becomes latency at a stated offered load, plus a queue that grows when the load is too high.
 That is a better benchmark shape anyway, and it is the single largest measurement gap left.
+The cheap partial answer available before then is a concurrency sweep at one fixed origin latency: 64 workers is what sets the queueing inside step 18's 397 µs floor, and nothing has measured how much of that floor is transport and how much is 63 other requests waiting.
 
 **Hit ratio against tree count.**
 The exchange rate above says a microsecond of eviction cost has to buy 1.2 basis points at a 200 µs origin, and the fits this workload produces have ranged from 7 to 41 trees at essentially the same AUC.
