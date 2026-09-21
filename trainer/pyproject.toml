@@ -19,8 +19,8 @@ dependencies = [
 # are compared byte for byte in CI, the generated stubs under belady/ and the format
 # check. A minor version bump in either would fail the build for no real reason.
 dev = [
-    "grpcio-tools==1.83.1",
-    "ruff==0.16.7",
+    "grpcio-tools==1.84.0",
+    "ruff==0.16.8",
     "pytest>=8.0",
     "pip-audit>=2.7",
 ]
