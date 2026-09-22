@@ -1,6 +1,9 @@
 package trace
 
-import "sync/atomic"
+import (
+	"math/bits"
+	"sync/atomic"
+)
 
 // Record is one access, and is deliberately 24 bytes with no pointers: the ring is
 // an array of these, so the drain loop is a straight memory copy and the garbage
@@ -60,9 +63,10 @@ func NewRing(capacity, sampleDenominator int) *Ring {
 	if sampleDenominator < 1 {
 		sampleDenominator = 1
 	}
+	size := roundUpPow2(capacity)
 	return &Ring{
-		buf:        make([]Record, roundUpPow2(capacity)),
-		mask:       uint64(roundUpPow2(capacity) - 1),
+		buf:        make([]Record, size),
+		mask:       uint64(size - 1),
 		sampleMask: uint64(roundUpPow2(sampleDenominator) - 1),
 	}
 }
@@ -120,10 +124,12 @@ func (r *Ring) counters() (pushed, dropped uint64) {
 	return r.pushed.Load(), r.drops.Load()
 }
 
+// roundUpPow2 matches cache.RoundShards, which does the same job for shard counts.
+// Not shared, because internal/cache already imports internal/trace and the stdlib
+// is one line either way.
 func roundUpPow2(n int) int {
-	p := 1
-	for p < n {
-		p <<= 1
+	if n < 1 {
+		return 1
 	}
-	return p
+	return 1 << bits.Len(uint(n-1))
 }

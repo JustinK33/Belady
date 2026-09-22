@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"os"
 	"strconv"
 	"strings"
 )
@@ -65,19 +64,6 @@ func Load(r io.Reader) (*Model, error) {
 		return nil, fmt.Errorf("model: max_feature_idx missing")
 	}
 	return p.m, nil
-}
-
-func LoadFile(path string) (*Model, error) {
-	f, err := os.Open(path) //nolint:gosec // path comes from operator config or a test, never from a request
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	m, err := Load(f)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
-	}
-	return m, nil
 }
 
 func (m *Model) NumFeatures() int { return m.numFeatures }

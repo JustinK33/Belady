@@ -12,6 +12,44 @@ import (
 
 func discard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// TestRingCapacityRoundsUpToAPowerOfTwo pins the sizing, which every other ring
+// test takes for granted by passing an exact power of two. The result becomes a
+// mask, so a size that is not a power of two does not fail loudly: Push writes at
+// tail&mask into a buffer of a different length and records overwrite each other
+// while the counters report success.
+func TestRingCapacityRoundsUpToAPowerOfTwo(t *testing.T) {
+	// Including the degenerate inputs NewRing clamps, so the rounding is exercised
+	// rather than hidden behind the clamp.
+	for _, c := range []struct{ in, want int }{
+		{-1, 2}, {0, 2}, {1, 2}, {2, 2}, {3, 4}, {5, 8}, {1000, 1024}, {1 << 16, 1 << 16},
+	} {
+		r := NewRing(c.in, 1)
+		if len(r.buf) != c.want {
+			t.Errorf("NewRing(%d) sized %d, want %d", c.in, len(r.buf), c.want)
+		}
+		if r.mask != uint64(len(r.buf)-1) {
+			t.Errorf("NewRing(%d) mask = %d, want %d: mask and length must agree", c.in, r.mask, len(r.buf)-1)
+		}
+	}
+
+	// A capacity that had to be rounded still holds every record it accepts.
+	r := NewRing(5, 1)
+	for i := range 8 {
+		if !r.Push(Record{KeyHash: uint64(i)}) {
+			t.Fatalf("push %d refused at a rounded capacity of %d", i, len(r.buf))
+		}
+	}
+	out := make([]Record, 8)
+	if n := r.Drain(out); n != 8 {
+		t.Fatalf("drained %d records, want 8", n)
+	}
+	for i := range 8 {
+		if out[i].KeyHash != uint64(i) {
+			t.Errorf("record %d has key %d: the mask and the buffer disagree", i, out[i].KeyHash)
+		}
+	}
+}
+
 func TestRingRoundTrip(t *testing.T) {
 	r := NewRing(8, 1)
 	for i := range 5 {

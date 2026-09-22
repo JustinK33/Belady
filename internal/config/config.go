@@ -86,7 +86,7 @@ func Strings(key string, def []string) []string {
 // Cache capacities are the main reason this exists; nobody should have to write
 // 1073741824 in a compose file.
 func Bytes(key string, def int64) int64 {
-	return parse(key, def, ParseBytes)
+	return parse(key, def, parseBytes)
 }
 
 var byteUnits = []struct {
@@ -100,7 +100,7 @@ var byteUnits = []struct {
 	{"b", 1},
 }
 
-func ParseBytes(s string) (int64, error) {
+func parseBytes(s string) (int64, error) {
 	norm := strings.ToLower(strings.TrimSpace(s))
 	if norm == "" {
 		return 0, fmt.Errorf("empty size")

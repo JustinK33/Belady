@@ -39,15 +39,15 @@ type Entry struct {
 	freq uint8 // saturating counter, read by s3fifo
 }
 
-func (e *Entry) Key() uint64           { return e.key }
-func (e *Entry) Value() []byte         { return e.value }
-func (e *Entry) Size() int32           { return e.size }
-func (e *Entry) LastAccess() int64     { return e.lastAccess }
-func (e *Entry) Admitted() int64       { return e.admitted }
-func (e *Entry) Accesses() uint32      { return e.accesses }
-func (e *Entry) Expires() int64        { return e.expires }
-func (e *Entry) Age(nowUS int64) int64 { return nowUS - e.admitted }
-func (e *Entry) Frequency() uint8      { return e.freq }
+// The accessors are the surface a policy sees. Value is deliberately not among
+// them: no eviction decision should be able to read the cached bytes, and the
+// shard reaches the field directly.
+func (e *Entry) Key() uint64       { return e.key }
+func (e *Entry) Size() int32       { return e.size }
+func (e *Entry) LastAccess() int64 { return e.lastAccess }
+func (e *Entry) Admitted() int64   { return e.admitted }
+func (e *Entry) Accesses() uint32  { return e.accesses }
+func (e *Entry) Frequency() uint8  { return e.freq }
 
 // Deltas returns a pointer so callers can read the history without copying 32
 // bytes on a path that runs once per eviction candidate.

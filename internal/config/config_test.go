@@ -22,19 +22,19 @@ func TestParseBytes(t *testing.T) {
 		" 2 TB": 2 << 40,
 	}
 	for in, want := range ok {
-		got, err := ParseBytes(in)
+		got, err := parseBytes(in)
 		if err != nil {
-			t.Errorf("ParseBytes(%q) unexpected error: %v", in, err)
+			t.Errorf("parseBytes(%q) unexpected error: %v", in, err)
 			continue
 		}
 		if got != want {
-			t.Errorf("ParseBytes(%q) = %d, want %d", in, got, want)
+			t.Errorf("parseBytes(%q) = %d, want %d", in, got, want)
 		}
 	}
 
 	for _, in := range []string{"", "mb", "-1gb", "twelve", "1zb"} {
-		if got, err := ParseBytes(in); err == nil {
-			t.Errorf("ParseBytes(%q) = %d, want error", in, got)
+		if got, err := parseBytes(in); err == nil {
+			t.Errorf("parseBytes(%q) = %d, want error", in, got)
 		}
 	}
 }
