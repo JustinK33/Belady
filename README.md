@@ -102,52 +102,16 @@ Read the hit ratio as the interesting result, the eviction cost as the price, an
 ## What building this taught me
 
 **The Belady boundary is a property of the workload, not a hyperparameter.**
-Set it above the reuse times in the trace and every object is labelled "will be reused"; set it below and none are.
-Either way the model trains happily, reports a fine accuracy, and ranks candidates at random.
-The trainer now refuses to fit when the labels come out more one-sided than 98/2, and prints the reuse-time quantiles instead.
+Set it above the reuse times in the trace and everything is labelled "will be reused", set it below and nothing is, and either way the model trains happily and ranks candidates at random.
+The trainer now refuses to fit when the labels come out more one-sided than 98/2.
 
 **Where you sample the training row matters more than which model you fit.**
-The obvious move is to label each access, but then `recency_ms` is identically zero in every training row, while at eviction it is large and decisive.
-Sampling each inter-access interval at a uniformly random offset instead is what makes recency usable, and it turned out to be the second most informative column.
-That one decision was worth more than any parameter on the booster.
+Labelling each access makes `recency_ms` identically zero in every row, while at eviction time it is large and decisive.
+Sampling each inter-access interval at a random offset instead made recency the second most informative column, which was worth more than any parameter on the booster.
 
-**A hit-ratio win is not a latency win, and the arithmetic is short enough that there is no excuse for skipping it.**
-6.5 µs of extra eviction cost at 0.111 evictions per request is 0.72 µs spent, against 0.66 points of hit ratio saved.
-Whether learned eviction is worth it depends almost entirely on what a miss costs, and that is a deployment fact, not a research one.
-
-**Doing that arithmetic with a number you configured rather than a number you measured is how it comes out wrong.**
-The first version of it priced an avoided miss at `ORIGIN_LATENCY`, on the reasoning that a flat-latency origin fixture exists precisely so the miss cost is exact.
-It is exact and it is not the miss cost: a miss also pays transport, a single-flight rendezvous and queueing, which together came to 730 µs on top of whatever the origin sleeps for.
-The conclusion had been "roughly break-even, do not claim a direction", and the direction was actually a factor of ten, hidden by an assumption that looked too obvious to check.
-Splitting the load generator's mean latency by hit and miss turns that into one measured column, which is a two-line change nobody had a reason to make until the number it produced disagreed.
-
-**A microbenchmark that has no baseline in it cannot be off by a factor, because it is not measuring the same thing.**
-The old headline here was that eviction cost 7x more live than the microbenchmark predicted, and blamed a hot model in L1.
-Then LRU was run through both, and it inflated 9.8x on the same trip from native single-shard bench to containerized three-node cluster.
-Most of the "unexplained" cost was the environment, and none of it needed a model to appear.
-The cache-locality story turned out to be real and small: 1.55x of a 9.8x factor, measured by giving the benchmark the live working set and concurrency.
-
-**Profiling replaced two confident guesses with one surprising answer.**
-The suspects were lock contention under the shard mutex and the pointer chase through map-range sampling, so `Entry` layout and `shard.Sample` were the planned fixes.
-A mutex profile attributes 4.13 ms to the shard lock and every microsecond of it to reads, never to eviction, and a CPU profile splits `Victim` into 74% tree evaluation, 16% feature extraction, and 10% sampling.
-Both planned fixes would have optimized a tenth of the cost.
-
-**Two languages sharing one feature vector is a silent-failure machine.**
-The Go extractor and the Python trainer declare the same fourteen columns in the same order, and nothing at runtime notices if they disagree: the model loads, evaluates, and reads `size_bytes` wherever it was trained to read `recency_ms`.
-The fix that actually works is a Go test that parses the Python source and fails the build, not a comment asking both sides to be careful.
-
-**Sample by key, not by request.**
-Relaxed Belady labelling needs the complete access history of the keys it labels, so sampling one request in sixteen produces histories with holes and gaps that are all wrong.
-Hashing the key and sampling on that keeps every sampled key's history complete, at the cost of a sampled fraction that swings widely run to run depending on whether the hottest keys landed in the sample.
-
-**The end of a trace looks exactly like "never accessed again".**
-Every row whose label window runs past the last record has to be dropped, or the model learns that the recording stopping is a property of the object.
-On an 8.5 s trace that was 6,856 rows out of 224,139.
-
-**Contracts that can be violated silently should be startup errors.**
-The trace recorder allocates one lock-free ring per shard, and the ring is only correct with a single producer.
-The shard count is rounded up to a power of two, so an operator asking for 100 shards gets 128, and a recorder built for 100 rings would hand two shards the same ring and corrupt the trace with no symptom.
-That is now a refusal to start rather than a comment.
+**A hit-ratio win is not a latency win until you price a miss with a number you measured.**
+The first version priced an avoided miss at the configured `ORIGIN_LATENCY`, missing the 730 µs of transport, single-flight rendezvous and queueing a real miss also pays.
+That turned "roughly break-even" into a factor of ten, hidden behind an assumption that looked too obvious to check.
 
 ## Documentation
 
