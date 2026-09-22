@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -29,6 +31,36 @@ func init() {
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
+}
+
+// Start is the startup sequence every service shares: install the process logger,
+// derive a context cancelled on SIGINT or SIGTERM, and run the debug endpoint until
+// that context is done. The returned func releases the signal handler, so callers
+// defer it.
+//
+// The debug endpoint comes up before the service configures itself, which is a
+// change from starting it afterwards: a node stuck loading a model now has /metrics
+// and pprof, which is exactly when you want them. /healthz was already liveness
+// rather than readiness, answering OK before the gRPC port binds, so this widens a
+// window that already existed rather than opening a new one.
+func Start(service string) (*slog.Logger, context.Context, func()) {
+	log := Init(service)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		if err := Serve(ctx, config.String("DEBUG_ADDR", ":9090")); err != nil {
+			log.Error("debug endpoint failed", "err", err)
+		}
+	}()
+	return log, ctx, stop
+}
+
+// Fatal logs a startup failure and exits 2, the status internal/config already uses
+// for a configuration the process cannot run with. Every service bootstrap has
+// several of these, and writing them out meant the exit code was a per-call-site
+// decision rather than a convention.
+func Fatal(log *slog.Logger, msg string, args ...any) {
+	log.Error(msg, args...)
+	os.Exit(2)
 }
 
 // Init installs a process-wide structured logger and returns it. LOG_LEVEL

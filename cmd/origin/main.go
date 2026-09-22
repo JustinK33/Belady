@@ -6,8 +6,6 @@ package main
 import (
 	"context"
 	"math"
-	"os/signal"
-	"syscall"
 	"time"
 
 	beladyv1 "github.com/JustinK33/Belady/gen/belady/v1"
@@ -79,8 +77,7 @@ func (s *server) value(key string) []byte {
 }
 
 func main() {
-	log := obs.Init("origin")
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	log, ctx, stop := obs.Start("origin")
 	defer stop()
 
 	srv := &server{
@@ -93,12 +90,6 @@ func main() {
 	log.Info("origin configured",
 		"latency", srv.latency.String(), "jitter", srv.jitter.String(),
 		"min_size", srv.minSize, "max_size", srv.maxSize, "alpha", srv.alpha)
-
-	go func() {
-		if err := obs.Serve(ctx, config.String("DEBUG_ADDR", ":9090")); err != nil {
-			log.Error("debug endpoint failed", "err", err)
-		}
-	}()
 
 	g := grpcx.NewServer()
 	beladyv1.RegisterOriginServer(g, srv)

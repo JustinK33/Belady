@@ -2,11 +2,6 @@
 package main
 
 import (
-	"context"
-	"os"
-	"os/signal"
-	"syscall"
-
 	beladyv1 "github.com/JustinK33/Belady/gen/belady/v1"
 	"github.com/JustinK33/Belady/internal/config"
 	"github.com/JustinK33/Belady/internal/grpcx"
@@ -15,23 +10,15 @@ import (
 )
 
 func main() {
-	log := obs.Init("registry")
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	log, ctx, stop := obs.Start("registry")
 	defer stop()
 
 	dir := config.String("MODEL_DIR", "/var/lib/belady/models")
 	srv, err := registry.New(dir)
 	if err != nil {
-		log.Error("model store init failed", "dir", dir, "err", err)
-		os.Exit(2)
+		obs.Fatal(log, "model store init failed", "dir", dir, "err", err)
 	}
 	log.Info("registry configured", "dir", dir, "latest", srv.Latest())
-
-	go func() {
-		if err := obs.Serve(ctx, config.String("DEBUG_ADDR", ":9090")); err != nil {
-			log.Error("debug endpoint failed", "err", err)
-		}
-	}()
 
 	g := grpcx.NewServer()
 	beladyv1.RegisterRegistryServer(g, srv)

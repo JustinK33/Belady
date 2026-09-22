@@ -4,9 +4,6 @@ package main
 
 import (
 	"context"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -172,14 +169,12 @@ func (s *server) Stats(ctx context.Context, req *beladyv1.StatsRequest) (*belady
 }
 
 func main() {
-	log := obs.Init("gateway")
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	log, ctx, stop := obs.Start("gateway")
 	defer stop()
 
 	addrs := config.Strings("CACHE_NODES", nil)
 	if len(addrs) == 0 {
-		log.Error("CACHE_NODES is required, as a comma-separated list of host:port")
-		os.Exit(2)
+		obs.Fatal(log, "CACHE_NODES is required, as a comma-separated list of host:port")
 	}
 
 	srv := &server{
@@ -198,8 +193,7 @@ func main() {
 	for _, addr := range addrs {
 		conn, err := grpcx.Dial(addr)
 		if err != nil {
-			log.Error("dial failed", "addr", addr, "err", err)
-			os.Exit(2)
+			obs.Fatal(log, "dial failed", "addr", addr, "err", err)
 		}
 		conns = append(conns, conn)
 		srv.nodes[addr] = beladyv1.NewCacheClient(conn)
@@ -212,20 +206,13 @@ func main() {
 		Help: "Requests currently held by the gateway.",
 	}, func() float64 { return float64(len(srv.inflight)) }))
 
-	go func() {
-		if err := obs.Serve(ctx, config.String("DEBUG_ADDR", ":9090")); err != nil {
-			log.Error("debug endpoint failed", "err", err)
-		}
-	}()
-
 	// The REST surface is off unless HTTP_ADDR is set, and a bad HTTP config is fatal
 	// rather than logged: starting without the API someone asked for is worse than
 	// not starting.
 	httpAddr := config.String("HTTP_ADDR", "")
 	httpTimeout := config.Duration("HTTP_TIMEOUT", 5*time.Second)
 	if httpAddr != "" && config.String("HTTP_AUTH_TOKEN", "") == "" {
-		log.Error("bad configuration", "err", errNoToken)
-		os.Exit(2)
+		obs.Fatal(log, "bad configuration", "err", errNoToken)
 	}
 	go func() {
 		if err := serveHTTP(ctx, httpAddr, config.String("HTTP_AUTH_TOKEN", ""), httpTimeout, srv, log); err != nil {

@@ -7,9 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/signal"
 	"runtime/debug"
-	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -181,8 +179,7 @@ func newRecorder(nodeID string, shards int, log *slog.Logger) (*trace.Recorder, 
 }
 
 func main() {
-	log := obs.Init("cachenode")
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	log, ctx, stop := obs.Start("cachenode")
 	defer stop()
 
 	// s3fifo rather than lru as the default because it is strictly better on hit
@@ -191,16 +188,14 @@ func main() {
 	policyName := config.String("CACHE_POLICY", "s3fifo")
 	mkPolicy, models, err := newPolicy(policyName)
 	if err != nil {
-		log.Error("bad configuration", "err", err)
-		os.Exit(2)
+		obs.Fatal(log, "bad configuration", "err", err)
 	}
 
 	nodeID := config.String("NODE_ID", hostnameOr("cachenode"))
 	shards := cache.RoundShards(config.Int("CACHE_SHARDS", 256))
 	recorder, err := newRecorder(nodeID, shards, log)
 	if err != nil {
-		log.Error("trace recorder init failed", "err", err)
-		os.Exit(2)
+		obs.Fatal(log, "trace recorder init failed", "err", err)
 	}
 
 	capacity := config.Bytes("CACHE_CAPACITY", 256<<20)
@@ -222,8 +217,7 @@ func main() {
 		Trace:         recorder,
 	})
 	if err != nil {
-		log.Error("cache init failed", "err", err)
-		os.Exit(2)
+		obs.Fatal(log, "cache init failed", "err", err)
 	}
 
 	srv := &server{
@@ -239,8 +233,7 @@ func main() {
 	if originAddr != "" {
 		conn, err := grpcx.Dial(originAddr)
 		if err != nil {
-			log.Error("origin dial failed", "addr", originAddr, "err", err)
-			os.Exit(2)
+			obs.Fatal(log, "origin dial failed", "addr", originAddr, "err", err)
 		}
 		defer func() { _ = conn.Close() }()
 		srv.origin = beladyv1.NewOriginClient(conn)
@@ -262,8 +255,7 @@ func main() {
 		} else {
 			rconn, err := grpcx.Dial(addr)
 			if err != nil {
-				log.Error("registry dial failed", "addr", addr, "err", err)
-				os.Exit(2)
+				obs.Fatal(log, "registry dial failed", "addr", addr, "err", err)
 			}
 			defer func() { _ = rconn.Close() }()
 
@@ -294,12 +286,6 @@ func main() {
 		}()
 		defer func() { <-traceDone }()
 	}
-
-	go func() {
-		if err := obs.Serve(ctx, config.String("DEBUG_ADDR", ":9090")); err != nil {
-			log.Error("debug endpoint failed", "err", err)
-		}
-	}()
 
 	g := grpcx.NewServer()
 	beladyv1.RegisterCacheServer(g, srv)
