@@ -51,7 +51,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # Generated per run rather than committed or stored as a secret: it authenticates
       # a container that exists for three minutes, and a literal in the workflow would
