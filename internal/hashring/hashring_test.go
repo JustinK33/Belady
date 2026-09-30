@@ -111,7 +111,10 @@ func TestAddingANodeMovesAboutOneOverN(t *testing.T) {
 	const keys = 20_000
 	before := make([]string, keys)
 	for i := range keys {
-		n, _ := r.Pick(fmt.Sprintf("key-%d", i))
+		n, err := r.Pick(fmt.Sprintf("key-%d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
 		r.Done(n)
 		before[i] = n
 	}
@@ -120,7 +123,10 @@ func TestAddingANodeMovesAboutOneOverN(t *testing.T) {
 
 	moved := 0
 	for i := range keys {
-		n, _ := r.Pick(fmt.Sprintf("key-%d", i))
+		n, err := r.Pick(fmt.Sprintf("key-%d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
 		r.Done(n)
 		if n != before[i] {
 			moved++

@@ -40,10 +40,10 @@ func TestMINEdgeCases(t *testing.T) {
 func TestMINIsMonotonicInCapacity(t *testing.T) {
 	trace := randomTrace(20_000, 2_000)
 	prev := -1.0
-	for _, cap := range []int{1, 2, 4, 8, 16, 64, 256, 1024, 4096} {
-		got := MINHitRatio(trace, cap)
+	for _, capacity := range []int{1, 2, 4, 8, 16, 64, 256, 1024, 4096} {
+		got := MINHitRatio(trace, capacity)
 		if got < prev {
-			t.Fatalf("hit ratio fell from %.4f to %.4f as capacity grew to %d", prev, got, cap)
+			t.Fatalf("hit ratio fell from %.4f to %.4f as capacity grew to %d", prev, got, capacity)
 		}
 		prev = got
 	}
@@ -56,33 +56,32 @@ func TestMINBeatsLRU(t *testing.T) {
 	for _, keyspace := range []int{100, 1_000, 10_000} {
 		trace := randomTrace(50_000, keyspace)
 		for _, capacity := range []int{16, 128, 1024} {
-			min := MINHitRatio(trace, capacity)
+			opt := MINHitRatio(trace, capacity)
 			lru := lruHitRatio(trace, capacity)
-			if lru > min {
-				t.Errorf("keyspace %d capacity %d: LRU %.4f beat MIN %.4f", keyspace, capacity, lru, min)
+			if lru > opt {
+				t.Errorf("keyspace %d capacity %d: LRU %.4f beat MIN %.4f", keyspace, capacity, lru, opt)
 			}
 		}
 	}
 }
 
 // TestMINStaysAboveWarmLRU is the same guarantee under the warmup prefix that
-// loadgen feeds it. Scoring a warm policy against a cold optimum is what made the
-// first end-to-end run report a policy above the ceiling.
+// loadgen feeds it. Scored from cold, the optimum can land below a warm policy.
 func TestMINStaysAboveWarmLRU(t *testing.T) {
 	const warmup = 5_000
 	trace := randomTrace(50_000, 20_000)
 	scored := append(append([]uint64{}, trace[:warmup]...), trace...)
 
 	for _, capacity := range []int{64, 512, 4096} {
-		min := MINHitRatioFrom(scored, capacity, warmup)
+		opt := MINHitRatioFrom(scored, capacity, warmup)
 		lru := lruHitRatioFrom(scored, capacity, warmup)
-		if lru > min {
-			t.Errorf("capacity %d: warm LRU %.4f beat warm MIN %.4f", capacity, lru, min)
+		if lru > opt {
+			t.Errorf("capacity %d: warm LRU %.4f beat warm MIN %.4f", capacity, lru, opt)
 		}
 		// A warm cache must score at least as well as a cold one over the same
 		// requests, otherwise the prefix is not reaching the simulation.
-		if cold := MINHitRatio(trace, capacity); min < cold {
-			t.Errorf("capacity %d: warm MIN %.4f below cold MIN %.4f", capacity, min, cold)
+		if cold := MINHitRatio(trace, capacity); opt < cold {
+			t.Errorf("capacity %d: warm MIN %.4f below cold MIN %.4f", capacity, opt, cold)
 		}
 	}
 }

@@ -1,18 +1,15 @@
 // Package hashring implements consistent hashing with bounded loads.
 //
-// Plain consistent hashing gives you the property everyone wants: adding or
-// removing a node moves only about 1/n of the keyspace. It does not give you any
-// bound on how unequal the load can get. One viral key, or one unlucky hash
-// distribution, and a single node takes a disproportionate share while its peers
-// idle.
+// Plain consistent hashing moves only about 1/n of the keyspace when a node is
+// added or removed, but puts no bound on how unequal the load can get: one hot key
+// or an unlucky hash distribution and a single node takes a disproportionate share.
 //
 // Consistent Hashing with Bounded Loads (Mirrokni, Thorup, Zadimoghaddam, 2016,
 // the algorithm behind Google's Cloud Load Balancing) fixes that with one extra
 // rule: every node has a capacity of c times the current average load, and a key
 // that lands on a full node walks forward around the ring to the next node with
 // room. Keys stay sticky while there is slack, and spill predictably when there
-// is not. The bound is what turns a hot key from an outage into a small amount of
-// extra cache duplication.
+// is not, so a hot key costs some cache duplication instead of one overloaded node.
 package hashring
 
 import (
@@ -154,9 +151,10 @@ func (r *Ring) Done(name string) {
 	r.total.Add(-1)
 }
 
-// capacityLocked is ceil(((total+1)/n) * factor), the per-node ceiling from the
-// paper. The +1 accounts for the request being placed, so a ring with zero load
-// still admits one request per node.
+// capacityLocked is floor(((total+1)/n) * factor) + 1, the paper's per-node
+// ceiling rounded up (one more than ceil when the product is whole). The total+1
+// accounts for the request being placed, so a ring with zero load still admits one
+// request per node.
 func (r *Ring) capacityLocked() int64 {
 	avg := float64(r.total.Load()+1) / float64(len(r.nodes))
 	c := int64(avg*r.factor) + 1

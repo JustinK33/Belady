@@ -4,8 +4,7 @@
 // the future. It is provably optimal and completely unimplementable online,
 // because it requires the future. Given a recorded trace the future is available,
 // so MIN can be computed after the fact and used as the ceiling every online
-// policy is measured against. Without it, "0.74 hit ratio" means nothing: it could
-// be two points off optimal or thirty.
+// policy is measured against, which turns a hit ratio into a distance from optimal.
 package belady
 
 import "container/heap"
@@ -27,11 +26,9 @@ func MINHitRatio(trace []uint64, capacity int) float64 {
 // MINHitRatioFrom simulates the whole trace but scores only requests at index
 // from onward.
 //
-// This exists because comparing against a warm cache requires it. A server that
-// replayed a warmup before the measured window starts the measurement with a
-// populated cache, so scoring MIN from cold compares a warm policy against a cold
-// optimum, and the "optimum" can come out lower than the policy it is supposed to
-// bound. Feed the warmup as a prefix and set from to its length.
+// A server that replayed a warmup starts the measured window with a populated
+// cache, and a MIN scored from cold can come out lower than the policy it is meant
+// to bound. Feed the warmup as a prefix and set from to its length.
 func MINHitRatioFrom(trace []uint64, capacity, from int) float64 {
 	if capacity <= 0 || len(trace) == 0 || from >= len(trace) {
 		return 0
