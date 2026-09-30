@@ -107,7 +107,7 @@ func TestScoreAppliesTheLogistic(t *testing.T) {
 	if got := m.Score(f); math.Abs(got-want) > 1e-9 {
 		t.Errorf("Score = %v, want %v", got, want)
 	}
-	// Monotone, which is the whole reason the eviction path can skip it.
+	// Monotone, so the eviction path can rank on Raw and skip it.
 	if m.Score([]float32{20, 9}) >= m.Score([]float32{1, 1}) {
 		t.Error("Score is not order-preserving with respect to Raw")
 	}
@@ -123,6 +123,11 @@ func TestRejectsUnsupportedTrees(t *testing.T) {
 		"multiclass":       strings.Replace(tiny, "num_class=1", "num_class=3", 1),
 		"unknown feature":  strings.Replace(tiny, "split_feature=0 1", "split_feature=0 7", 1),
 		"array mismatch":   strings.Replace(tiny, "threshold=10 5", "threshold=10", 1),
+		// A walk would index past the arrays, or loop forever.
+		"child out of range": strings.Replace(tiny, "left_child=1 -1", "left_child=5 -1", 1),
+		"leaf out of range":  strings.Replace(tiny, "right_child=-2 -3", "right_child=-2 -9", 1),
+		"back edge":          strings.Replace(tiny, "left_child=1 -1", "left_child=1 0", 1),
+		"shared leaf":        strings.Replace(tiny, "right_child=-2 -3", "right_child=-2 -2", 1),
 	}
 	for name, text := range cases {
 		if _, err := Load(strings.NewReader(text)); err == nil {
@@ -305,16 +310,15 @@ func BenchmarkLoad(b *testing.B) {
 // every evaluation, which is the only thing the live cache ever does: eight
 // candidates per eviction, each with its own recency, size and access history.
 //
-// It exists because the live eviction cost came in far above what BenchmarkRaw
-// predicted, and BenchmarkRaw evaluates one hot vector in a loop. A tree walk is a
+// BenchmarkRaw evaluates one hot vector in a loop, which underestimates the live
+// eviction cost by a wide margin. A tree walk is a
 // chain of data-dependent branches, so a fixed vector takes the same path every
 // time and the branch predictor learns all of it. Nothing live is predictable that
 // way, and this measures the difference.
 //
 // The vectors are drawn from the same uniform range as the synthetic thresholds, so
 // each comparison is close to a coin flip. That is the worst case rather than the
-// average one, and the point is the size of the effect, not a number to quote as
-// the model's cost.
+// average one, so read it as the size of the effect, not as the model's cost.
 func BenchmarkRawVaryingFeatures(b *testing.B) {
 	const (
 		features = 16

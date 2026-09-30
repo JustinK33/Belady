@@ -7,8 +7,7 @@
 // tree ensemble. A GBDT predictor is a threshold comparison and two array indices
 // per level, so it is worth hand-rolling. See docs/adr/0004.
 //
-// The layout is the reason it is fast. Every node of every tree lives in one
-// contiguous slice of 16-byte structs, so a walk down a tree touches sequential-ish
+// Every node of every tree lives in one contiguous slice of 16-byte structs, so a walk down a tree touches sequential-ish
 // memory with no pointer chasing, no per-tree bounds setup, and no interface
 // dispatch in the inner loop.
 package model
@@ -101,8 +100,8 @@ func (m *Model) Raw(features []float32) float32 {
 // Score is Raw put through the objective's link function, so the result is the
 // probability the trainer was fitting.
 //
-// The eviction path deliberately does not call this. Ranking candidates only needs
-// order, the logistic is monotone, and skipping it saves an Exp per candidate.
+// The eviction path does not call this. Ranking candidates only needs order, the
+// logistic is monotone, and skipping it saves an Exp per candidate.
 func (m *Model) Score(features []float32) float64 {
 	raw := float64(m.Raw(features))
 	if strings.HasPrefix(m.objective, "binary") {
@@ -223,6 +222,10 @@ func (p *parser) flush() error {
 		return fmt.Errorf("model: tree arrays disagree with num_leaves=%d", p.numLeaves)
 	}
 
+	if err := p.checkShape(internal); err != nil {
+		return err
+	}
+
 	base := int32(len(p.m.nodes))
 	for i := range internal {
 		if err := p.checkDecisionType(p.decisionType[i]); err != nil {
@@ -240,6 +243,35 @@ func (p *parser) flush() error {
 	}
 	p.m.roots = append(p.m.roots, base)
 	p.reset()
+	return nil
+}
+
+// checkShape proves the child arrays form a tree before Raw walks them: every index
+// in range, the root never a child, and every other node and every leaf the child
+// of exactly one parent. A walk from the root can then neither index out of range
+// nor loop, so Raw needs no checks of its own.
+func (p *parser) checkShape(internal int) error {
+	parents := make([]uint8, internal+p.numLeaves)
+	for _, children := range [][]int32{p.leftChild, p.rightChild} {
+		for _, v := range children {
+			slot := int(v)
+			if v < 0 {
+				slot = internal + int(^v)
+			}
+			switch {
+			case v >= 0 && int(v) >= internal, v < 0 && int(^v) >= p.numLeaves:
+				return fmt.Errorf("model: child index %d out of range", v)
+			case v == 0:
+				return fmt.Errorf("model: the root is the child of another node")
+			}
+			parents[slot]++
+		}
+	}
+	for slot, n := range parents[1:] {
+		if n != 1 {
+			return fmt.Errorf("model: node slot %d has %d parents, want 1", slot+1, n)
+		}
+	}
 	return nil
 }
 
