@@ -57,6 +57,8 @@ func main() {
 		die(2, "ZIPF_S must be greater than 1")
 	case opts.requests < 0:
 		die(2, "REQUESTS must not be negative")
+	case opts.warmup < 0:
+		die(2, "WARMUP must not be negative")
 	case opts.keyspace < 1:
 		die(2, "KEYSPACE must be at least 1")
 	case opts.concurrency < 1:
