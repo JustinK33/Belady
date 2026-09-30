@@ -4,9 +4,14 @@ package main
 
 import (
 	"context"
+	"errors"
+	"maps"
+	"os"
+	"slices"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -36,9 +41,8 @@ type server struct {
 	ring  *hashring.Ring
 	nodes map[string]beladyv1.CacheClient
 
-	// inflight bounds concurrent upstream work. A gateway with no ceiling converts
-	// a downstream slowdown into unbounded memory growth here, which is how a
-	// latency incident becomes an outage.
+	// inflight bounds concurrent upstream work, so a downstream slowdown queues
+	// here as a ResourceExhausted error rather than as unbounded memory growth.
 	// ponytail: a semaphore, not a token bucket. Per-tenant QPS limiting belongs at
 	// the edge proxy that already knows who the tenant is.
 	inflight chan struct{}
@@ -65,85 +69,118 @@ func (s *server) admit(ctx context.Context) (func(), error) {
 	case s.inflight <- struct{}{}:
 		return func() { <-s.inflight }, nil
 	case <-ctx.Done():
-		// The caller's deadline expired while queued. Reporting this as a distinct
-		// code is what lets a dashboard tell overload apart from slowness.
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return nil, status.FromContextError(ctx.Err()).Err()
+		}
+		// The deadline expired while queued. A distinct code is what lets a dashboard
+		// tell overload apart from slowness.
 		return nil, status.Error(codes.ResourceExhausted, "gateway at capacity")
 	}
 }
 
-func (s *server) Get(ctx context.Context, req *beladyv1.GetRequest) (*beladyv1.GetResponse, error) {
+type keyed interface{ GetKey() string }
+
+// forward sends a single-key request to the node that owns the key.
+func forward[Req keyed, Resp any](ctx context.Context, s *server, req Req,
+	call func(beladyv1.CacheClient, context.Context, Req, ...grpc.CallOption) (Resp, error),
+) (resp Resp, err error) {
 	if req.GetKey() == "" {
-		return nil, status.Error(codes.InvalidArgument, "key must not be empty")
+		return resp, status.Error(codes.InvalidArgument, "key must not be empty")
 	}
 	release, err := s.admit(ctx)
 	if err != nil {
-		return nil, err
+		return resp, err
 	}
 	defer release()
 
 	client, _, done, err := s.route(req.GetKey())
 	if err != nil {
-		return nil, err
+		return resp, err
 	}
 	defer done()
 
-	return client.Get(ctx, req)
+	return call(client, ctx, req)
+}
+
+func (s *server) Get(ctx context.Context, req *beladyv1.GetRequest) (*beladyv1.GetResponse, error) {
+	return forward(ctx, s, req, beladyv1.CacheClient.Get)
 }
 
 func (s *server) Put(ctx context.Context, req *beladyv1.PutRequest) (*beladyv1.PutResponse, error) {
-	if req.GetKey() == "" {
-		return nil, status.Error(codes.InvalidArgument, "key must not be empty")
-	}
+	return forward(ctx, s, req, beladyv1.CacheClient.Put)
+}
+
+// broadcast calls every node in parallel and returns their answers in node-name
+// order. The first failure cancels the rest and keeps its gRPC code.
+func broadcast[Resp any](ctx context.Context, s *server, op string,
+	call func(context.Context, beladyv1.CacheClient) (Resp, error),
+) ([]Resp, error) {
 	release, err := s.admit(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
 
-	client, _, done, err := s.route(req.GetKey())
+	names := slices.Sorted(maps.Keys(s.nodes))
+	out := make([]Resp, len(names))
+	g, gctx := errgroup.WithContext(ctx)
+	for i, name := range names {
+		g.Go(func() error {
+			resp, err := call(gctx, s.nodes[name])
+			if err != nil {
+				return status.Errorf(status.Code(err), "%s on %s failed: %s", op, name, status.Convert(err).Message())
+			}
+			out[i] = resp
+			return nil
+		})
+	}
+	return out, g.Wait()
+}
+
+// Delete reaches every node: bounded loads mean a key is not guaranteed to live on
+// exactly one, and a stale copy would resurface when load shifts. A failure can
+// leave the key deleted on some nodes, so the client should retry.
+func (s *server) Delete(ctx context.Context, req *beladyv1.DeleteRequest) (*beladyv1.DeleteResponse, error) {
+	if req.GetKey() == "" {
+		return nil, status.Error(codes.InvalidArgument, "key must not be empty")
+	}
+	resps, err := broadcast(ctx, s, "delete", func(ctx context.Context, c beladyv1.CacheClient) (*beladyv1.DeleteResponse, error) {
+		return c.Delete(ctx, req)
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer done()
-
-	return client.Put(ctx, req)
-}
-
-func (s *server) Delete(ctx context.Context, req *beladyv1.DeleteRequest) (*beladyv1.DeleteResponse, error) {
-	// Bounded loads mean a key is not guaranteed to live on exactly one node, so a
-	// delete has to reach all of them. Cheap, and the alternative is a stale value
-	// resurfacing when load shifts.
 	existed := false
-	for name, client := range s.nodes {
-		resp, err := client.Delete(ctx, req)
-		if err != nil {
-			return nil, status.Errorf(codes.Unavailable, "delete on %s failed: %v", name, err)
-		}
-		existed = existed || resp.GetExisted()
+	for _, r := range resps {
+		existed = existed || r.GetExisted()
 	}
 	return &beladyv1.DeleteResponse{Existed: existed}, nil
 }
 
-// Stats sums the cluster. Counters add cleanly, and the eviction-time mean is
-// recomputed from the summed numerator and denominator rather than averaged, so a
-// node that evicted twice does not count as much as one that evicted ten thousand
-// times. It is still a mean, not a percentile.
+// Stats sums the cluster. The eviction-time mean is recomputed from the summed
+// numerator and denominator rather than averaged, so a node that evicted twice
+// does not count as much as one that evicted ten thousand times. It is still a
+// mean, not a percentile.
 func (s *server) Stats(ctx context.Context, req *beladyv1.StatsRequest) (*beladyv1.StatsResponse, error) {
-	out := &beladyv1.StatsResponse{NodeId: "gateway"}
+	resps, err := broadcast(ctx, s, "stats", func(ctx context.Context, c beladyv1.CacheClient) (*beladyv1.StatsResponse, error) {
+		return c.Stats(ctx, req)
+	})
+	if err != nil {
+		return nil, err
+	}
 
-	for name, client := range s.nodes {
-		st, err := client.Stats(ctx, req)
-		if err != nil {
-			return nil, status.Errorf(codes.Unavailable, "stats from %s failed: %v", name, err)
+	out := &beladyv1.StatsResponse{NodeId: "gateway"}
+	for i, st := range resps {
+		// A mixed cluster makes every hit-ratio comparison meaningless, so say so
+		// rather than reporting a blended number.
+		if i == 0 {
+			out.Policy, out.ModelVersion = st.GetPolicy(), st.GetModelVersion()
 		}
-		switch {
-		case out.Policy == "":
-			out.Policy = st.GetPolicy()
-			out.ModelVersion = st.GetModelVersion()
-		case out.Policy != st.GetPolicy():
-			// A mixed cluster makes every hit-ratio comparison meaningless, so say so
-			// loudly rather than reporting a blended number.
+		if out.Policy != st.GetPolicy() {
 			out.Policy = "mixed"
+		}
+		if out.ModelVersion != st.GetModelVersion() {
+			out.ModelVersion = "mixed"
 		}
 
 		out.Hits += st.GetHits()
@@ -162,9 +199,6 @@ func (s *server) Stats(ctx context.Context, req *beladyv1.StatsRequest) (*belady
 		out.EvictNs += st.GetEvictNs()
 		out.EvictSample += st.GetEvictSample()
 	}
-	// Summing the raw pair and dividing once gives the true cluster mean. Averaging
-	// each node's mean, which is what this used to do, weights a node that evicted
-	// twice the same as one that evicted ten thousand times.
 	if out.EvictSample > 0 {
 		out.EvictNsMean = out.EvictNs / out.EvictSample
 	}
@@ -180,10 +214,22 @@ func main() {
 		obs.Fatal(log, "CACHE_NODES is required, as a comma-separated list of host:port")
 	}
 
+	replicas := config.Int("RING_REPLICAS", 256)
+	factor := config.Float("RING_LOAD_FACTOR", 1.25)
+	maxInflight := config.Int("MAX_INFLIGHT", 4096)
+	switch {
+	case replicas < 1:
+		obs.Fatal(log, "RING_REPLICAS must be at least 1", "value", replicas)
+	case factor <= 1:
+		obs.Fatal(log, "RING_LOAD_FACTOR must be above 1", "value", factor)
+	case maxInflight < 1:
+		obs.Fatal(log, "MAX_INFLIGHT must be at least 1", "value", maxInflight)
+	}
+
 	srv := &server{
-		ring:     hashring.New(config.Int("RING_REPLICAS", 256), config.Float("RING_LOAD_FACTOR", 1.25)),
+		ring:     hashring.New(replicas, factor),
 		nodes:    make(map[string]beladyv1.CacheClient, len(addrs)),
-		inflight: make(chan struct{}, config.Int("MAX_INFLIGHT", 4096)),
+		inflight: make(chan struct{}, maxInflight),
 	}
 
 	conns := make([]*grpc.ClientConn, 0, len(addrs))
@@ -209,23 +255,38 @@ func main() {
 		Help: "Requests currently held by the gateway.",
 	}, func() float64 { return float64(len(srv.inflight)) }))
 
-	// The REST surface is off unless HTTP_ADDR is set, and a bad HTTP config is fatal
-	// rather than logged: starting without the API someone asked for is worse than
-	// not starting.
+	// The REST surface is off unless HTTP_ADDR is set. A failure to serve it stops
+	// the process: running without the API someone asked for is worse than not
+	// running.
 	httpAddr := config.String("HTTP_ADDR", "")
-	httpTimeout := config.Duration("HTTP_TIMEOUT", 5*time.Second)
-	if httpAddr != "" && config.String("HTTP_AUTH_TOKEN", "") == "" {
+	token := config.String("HTTP_AUTH_TOKEN", "")
+	if httpAddr != "" && token == "" {
 		obs.Fatal(log, "bad configuration", "err", errNoToken)
 	}
+	var httpErr error
+	httpDone := make(chan struct{})
 	go func() {
-		if err := serveHTTP(ctx, httpAddr, config.String("HTTP_AUTH_TOKEN", ""), httpTimeout, srv, log); err != nil {
-			log.Error("http api failed", "err", err)
+		defer close(httpDone)
+		if httpAddr == "" {
+			return
+		}
+		api := &httpAPI{srv: srv, token: []byte(token), timeout: config.Duration("HTTP_TIMEOUT", 5*time.Second), log: log}
+		if httpErr = serveHTTP(ctx, httpAddr, api); httpErr != nil {
+			log.Error("http api failed", "err", httpErr)
+			stop()
 		}
 	}()
 
 	g := grpcx.NewServer()
 	beladyv1.RegisterCacheServer(g, srv)
-	if err := grpcx.Serve(ctx, config.String("GRPC_ADDR", ":8080"), g); err != nil {
+	err := grpcx.Serve(ctx, config.String("GRPC_ADDR", ":8080"), g)
+	stop()
+	if err != nil {
 		log.Error("serve failed", "err", err)
+	}
+	// Both servers have drained before the deferred node connections close.
+	<-httpDone
+	if err != nil || httpErr != nil {
+		os.Exit(1)
 	}
 }

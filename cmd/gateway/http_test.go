@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc"
 
 	beladyv1 "github.com/JustinK33/Belady/gen/belady/v1"
+	"github.com/JustinK33/Belady/internal/grpcx"
 	"github.com/JustinK33/Belady/internal/hashring"
 )
 
@@ -67,12 +68,7 @@ func newTestAPI(t *testing.T) (http.Handler, *fakeNode) {
 		timeout: time.Second,
 		log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/keys/{key...}", api.get)
-	mux.HandleFunc("PUT /v1/keys/{key...}", api.put)
-	mux.HandleFunc("DELETE /v1/keys/{key...}", api.delete)
-	mux.HandleFunc("GET /v1/stats", api.stats)
-	return api.authenticated(mux), node
+	return api.handler(), node
 }
 
 func do(t *testing.T, h http.Handler, method, target, token, body string) *httptest.ResponseRecorder {
@@ -179,5 +175,48 @@ func TestHTTPStats(t *testing.T) {
 	// 3 hits and 1 miss from the fake node.
 	if body := rec.Body.String(); !strings.Contains(body, `"object_hit_ratio":0.75`) {
 		t.Errorf("stats body = %s", body)
+	}
+}
+
+type failingBody struct{}
+
+func (failingBody) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+// Only an oversized body is a 413. A client that disconnects mid-upload sent a
+// broken request, not a big one.
+func TestHTTPBodyErrors(t *testing.T) {
+	h, _ := newTestAPI(t)
+
+	req := httptest.NewRequest(http.MethodPut, "/v1/keys/a", failingBody{})
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("broken body returned %d, want 400", rec.Code)
+	}
+
+	big := strings.Repeat("x", grpcx.MaxRecvBytes+1)
+	if got := do(t, h, http.MethodPut, "/v1/keys/a", testToken, big).Code; got != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized body returned %d, want 413", got)
+	}
+}
+
+// A TTL past uint32 seconds would wrap to a short one.
+func TestHTTPTTLOverflowIsRejected(t *testing.T) {
+	h, _ := newTestAPI(t)
+	if got := do(t, h, http.MethodPut, "/v1/keys/a?ttl=2000000h", testToken, "v").Code; got != http.StatusBadRequest {
+		t.Errorf("ttl=2000000h returned %d, want 400", got)
+	}
+}
+
+// The auth scheme is case-insensitive (RFC 7235); the token is not.
+func TestHTTPBearerSchemeIsCaseInsensitive(t *testing.T) {
+	h, _ := newTestAPI(t)
+	req := httptest.NewRequest(http.MethodGet, "/v1/keys/a", nil)
+	req.Header.Set("Authorization", "bearer "+testToken)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("lowercase scheme returned %d, want 404", rec.Code)
 	}
 }
