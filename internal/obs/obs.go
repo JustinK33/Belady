@@ -35,37 +35,34 @@ func init() {
 
 // Start is the startup sequence every service shares: install the process logger,
 // derive a context cancelled on SIGINT or SIGTERM, and run the debug endpoint until
-// that context is done. The returned func releases the signal handler, so callers
-// defer it.
+// that context is done. version is the binary's -X main.version stamp, logged once.
+// The returned func releases the signal handler, so callers defer it.
 //
-// The debug endpoint comes up before the service configures itself, which is a
-// change from starting it afterwards: a node stuck loading a model now has /metrics
-// and pprof, which is exactly when you want them. /healthz was already liveness
-// rather than readiness, answering OK before the gRPC port binds, so this widens a
-// window that already existed rather than opening a new one.
-func Start(service string) (*slog.Logger, context.Context, func()) {
-	log := Init(service)
+// The debug endpoint comes up before the service configures itself, so a node stuck
+// at startup still has /metrics and pprof. /healthz is liveness, not readiness: it
+// answers OK before the gRPC port binds.
+func Start(service, version string) (*slog.Logger, context.Context, func()) {
+	log := initLogger(service)
+	log.Info("starting", "version", version)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		if err := Serve(ctx, config.String("DEBUG_ADDR", ":9090")); err != nil {
+		if err := serveDebug(ctx, config.String("DEBUG_ADDR", ":9090")); err != nil {
 			log.Error("debug endpoint failed", "err", err)
 		}
 	}()
 	return log, ctx, stop
 }
 
-// Fatal logs a startup failure and exits 2, the status internal/config already uses
-// for a configuration the process cannot run with. Every service bootstrap has
-// several of these, and writing them out meant the exit code was a per-call-site
-// decision rather than a convention.
+// Fatal logs a startup failure and exits 2, the status internal/config uses for a
+// configuration the process cannot run with.
 func Fatal(log *slog.Logger, msg string, args ...any) {
 	log.Error(msg, args...)
 	os.Exit(2)
 }
 
-// Init installs a process-wide structured logger and returns it. LOG_LEVEL
+// initLogger installs a process-wide structured logger and returns it. LOG_LEVEL
 // accepts debug, info, warn, error. LOG_FORMAT accepts json or text.
-func Init(service string) *slog.Logger {
+func initLogger(service string) *slog.Logger {
 	var level slog.Level
 	if err := level.UnmarshalText([]byte(strings.ToLower(os.Getenv("LOG_LEVEL")))); err != nil {
 		level = slog.LevelInfo
@@ -95,9 +92,8 @@ func Init(service string) *slog.Logger {
 // acquisition and every blocking operation in the process. That is also why a run
 // with this on must not be the run that quotes throughput.
 //
-// One switch, and both samplers set to report every event. A diagnostic run wants
-// the whole picture; tuning the sampling rates is a problem for a process too hot
-// to profile at all, which is not this one.
+// ponytail: one switch, both samplers at every event. Separate rates are the
+// upgrade if a process is ever too hot to profile at full sampling.
 func enableContentionProfiles(l *slog.Logger) {
 	if !config.Bool("PROFILE_CONTENTION", false) {
 		return
@@ -108,10 +104,10 @@ func enableContentionProfiles(l *slog.Logger) {
 		"do not quote latency or QPS from this run")
 }
 
-// Serve runs the debug endpoint until ctx is cancelled. It exposes /metrics,
+// serveDebug runs the debug endpoint until ctx is cancelled. It exposes /metrics,
 // /healthz and the pprof handlers on a port separate from the gRPC port, so the
 // debug surface can be firewalled off without touching the data path.
-func Serve(ctx context.Context, addr string) error {
+func serveDebug(ctx context.Context, addr string) error {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(Registry, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -122,26 +118,43 @@ func Serve(ctx context.Context, addr string) error {
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
+	slog.Info("debug endpoint listening", "addr", addr)
+	return ServeHTTP(ctx, &http.Server{Addr: addr, Handler: mux}) //nolint:gosec // G112: ServeHTTP sets ReadHeaderTimeout
+}
+
+// ServeHTTP runs srv until ctx is cancelled, then gives in-flight requests five
+// seconds to finish before returning. Timeouts left at zero get defaults, so a
+// slow client cannot hold a connection open indefinitely. WriteTimeout clears the
+// 30-second CPU profile pprof takes by default.
+func ServeHTTP(ctx context.Context, srv *http.Server) error {
+	if srv.ReadHeaderTimeout == 0 {
+		srv.ReadHeaderTimeout = 5 * time.Second
+	}
+	if srv.ReadTimeout == 0 {
+		srv.ReadTimeout = 30 * time.Second
+	}
+	if srv.WriteTimeout == 0 {
+		srv.WriteTimeout = 60 * time.Second
+	}
+	if srv.IdleTimeout == 0 {
+		srv.IdleTimeout = 120 * time.Second
 	}
 
-	// The shutdown context below is deliberately not derived from ctx: ctx is already
-	// cancelled by the time this goroutine wakes, and a cancelled context gives
-	// Shutdown no grace period at all.
+	stopped := make(chan struct{})
+	// ctx is already cancelled when Shutdown runs, so its grace period needs a
+	// fresh context.
 	go func() { //nolint:gosec // G118, see above
+		defer close(stopped)
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
 	}()
 
-	slog.Info("debug endpoint listening", "addr", addr)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+	<-stopped
 	return nil
 }
 

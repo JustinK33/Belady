@@ -9,8 +9,11 @@ import (
 	"github.com/JustinK33/Belady/internal/registry"
 )
 
+// version is set at release time with -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
-	log, ctx, stop := obs.Start("registry")
+	log, ctx, stop := obs.Start("registry", version)
 	defer stop()
 
 	dir := config.String("MODEL_DIR", "/var/lib/belady/models")

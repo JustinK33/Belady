@@ -15,6 +15,9 @@ import (
 	"github.com/JustinK33/Belady/internal/obs"
 )
 
+// version is set at release time with -ldflags "-X main.version=...".
+var version = "dev"
+
 type server struct {
 	beladyv1.UnimplementedOriginServer
 
@@ -77,7 +80,7 @@ func (s *server) value(key string) []byte {
 }
 
 func main() {
-	log, ctx, stop := obs.Start("origin")
+	log, ctx, stop := obs.Start("origin", version)
 	defer stop()
 
 	srv := &server{

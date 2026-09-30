@@ -18,6 +18,9 @@ import (
 	"github.com/JustinK33/Belady/internal/obs"
 )
 
+// version is set at release time with -ldflags "-X main.version=...".
+var version = "dev"
+
 var routed = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "belady_gateway_routed_total",
 	Help: "Requests routed, by destination node.",
@@ -169,7 +172,7 @@ func (s *server) Stats(ctx context.Context, req *beladyv1.StatsRequest) (*belady
 }
 
 func main() {
-	log, ctx, stop := obs.Start("gateway")
+	log, ctx, stop := obs.Start("gateway", version)
 	defer stop()
 
 	addrs := config.Strings("CACHE_NODES", nil)

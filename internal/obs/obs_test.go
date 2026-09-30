@@ -1,6 +1,7 @@
 package obs
 
 import (
+	"context"
 	"log/slog"
 	"net"
 	"net/http"
@@ -10,14 +11,14 @@ import (
 	"time"
 )
 
-// TestStartServesHealthAndCancelsOnSignal covers the two promises four binaries now
-// make through Start. Both failures are silent: a debug endpoint that never binds
+// TestStartServesHealthAndCancelsOnSignal covers the two promises every binary
+// relies on from Start. Both failures are silent: a debug endpoint that never binds
 // makes scripts/wait-for-health.sh time out on a service that is actually fine, and
 // a context that ignores SIGTERM turns every graceful shutdown into a kill after
 // Compose's grace period, which loses the recorder's last trace segment.
 func TestStartServesHealthAndCancelsOnSignal(t *testing.T) {
 	// Bind to find a free port, then release it. Racy in principle, but the
-	// alternative is Serve returning its listener purely so a test can read a port.
+	// alternative is serveDebug returning its listener purely so a test can read a port.
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserve port: %v", err)
@@ -26,7 +27,7 @@ func TestStartServesHealthAndCancelsOnSignal(t *testing.T) {
 	_ = l.Close()
 	t.Setenv("DEBUG_ADDR", addr)
 
-	_, ctx, stop := Start("test")
+	_, ctx, stop := Start("test", "dev")
 	defer stop()
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -81,5 +82,53 @@ func TestContentionProfilingEnabled(t *testing.T) {
 
 	if got := runtime.SetMutexProfileFraction(-1); got != 1 {
 		t.Errorf("mutex profile fraction = %d, want 1", got)
+	}
+}
+
+// ServeHTTP must fill in every timeout, and must not return until an in-flight
+// request has finished, or the caller closes connections out from under it.
+func TestServeHTTPSetsTimeoutsAndDrains(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	_ = l.Close()
+
+	entered, finish := make(chan struct{}), make(chan struct{})
+	srv := &http.Server{Addr: addr, Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		<-finish
+		w.WriteHeader(http.StatusNoContent)
+	})}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- ServeHTTP(ctx, srv) }()
+
+	go func() {
+		for {
+			resp, err := http.Get("http://" + addr) //nolint:noctx // test
+			if err == nil {
+				_ = resp.Body.Close()
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+	<-entered
+	if srv.ReadTimeout == 0 || srv.WriteTimeout == 0 || srv.IdleTimeout == 0 || srv.ReadHeaderTimeout == 0 {
+		t.Fatalf("timeouts left unset: read header %s, read %s, write %s, idle %s",
+			srv.ReadHeaderTimeout, srv.ReadTimeout, srv.WriteTimeout, srv.IdleTimeout)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		t.Fatalf("returned with a request in flight: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(finish)
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

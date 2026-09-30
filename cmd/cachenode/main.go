@@ -24,6 +24,9 @@ import (
 	"github.com/JustinK33/Belady/internal/trace"
 )
 
+// version is set at release time with -ldflags "-X main.version=...".
+var version = "dev"
+
 type server struct {
 	beladyv1.UnimplementedCacheServer
 
@@ -179,7 +182,7 @@ func newRecorder(nodeID string, shards int, log *slog.Logger) (*trace.Recorder, 
 }
 
 func main() {
-	log, ctx, stop := obs.Start("cachenode")
+	log, ctx, stop := obs.Start("cachenode", version)
 	defer stop()
 
 	// s3fifo rather than lru as the default because it is strictly better on hit

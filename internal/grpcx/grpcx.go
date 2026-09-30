@@ -66,14 +66,17 @@ func NewServer(extra ...grpc.ServerOption) *grpc.Server {
 			MinTime:             10 * time.Second,
 			PermitWithoutStream: true,
 		}),
-		grpc.ChainUnaryInterceptor(recoverUnary, measureUnary),
+		// measure is outermost so a recovered panic is still observed, as Internal.
+		grpc.ChainUnaryInterceptor(measureUnary, recoverUnary),
+		grpc.ChainStreamInterceptor(measureStream, recoverStream),
 	}
 	return grpc.NewServer(append(opts, extra...)...)
 }
 
 // Serve runs a gRPC server until ctx is cancelled, then drains in-flight RPCs.
 func Serve(ctx context.Context, addr string, srv *grpc.Server) error {
-	healthpb.RegisterHealthServer(srv, health.NewServer())
+	hs := health.NewServer()
+	healthpb.RegisterHealthServer(srv, hs)
 
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -83,13 +86,12 @@ func Serve(ctx context.Context, addr string, srv *grpc.Server) error {
 	done := make(chan struct{})
 	go func() {
 		<-ctx.Done()
+		hs.Shutdown()
 		// GracefulStop waits for in-flight RPCs. A hard Stop after a grace period
 		// keeps a stuck handler from blocking shutdown forever.
-		go func() {
-			time.Sleep(10 * time.Second)
-			srv.Stop()
-		}()
+		hard := time.AfterFunc(10*time.Second, srv.Stop)
 		srv.GracefulStop()
+		hard.Stop()
 		close(done)
 	}()
 
@@ -118,23 +120,41 @@ func Dial(target string) (*grpc.ClientConn, error) {
 	)
 }
 
-// recoverUnary converts a handler panic into an Internal error. One malformed
-// request should cost one response, not the whole process and every cached object
-// in it.
+// recovered converts a handler panic into an Internal error, so one malformed
+// request costs one response rather than the process. Deferred by the recover
+// interceptors.
+func recovered(method string, err *error) {
+	if p := recover(); p != nil {
+		rpcPanics.Inc()
+		slog.Error("panic in handler", "method", method, "panic", p, "stack", string(debug.Stack()))
+		*err = status.Errorf(codes.Internal, "internal error")
+	}
+}
+
 func recoverUnary(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
-	defer func() {
-		if p := recover(); p != nil {
-			rpcPanics.Inc()
-			slog.Error("panic in handler", "method", info.FullMethod, "panic", p, "stack", string(debug.Stack()))
-			err = status.Errorf(codes.Internal, "internal error")
-		}
-	}()
+	defer recovered(info.FullMethod, &err)
 	return handler(ctx, req)
+}
+
+func recoverStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+	defer recovered(info.FullMethod, &err)
+	return handler(srv, ss)
+}
+
+func observe(method string, start time.Time, err error) {
+	rpcDuration.WithLabelValues(method, status.Code(err).String()).Observe(time.Since(start).Seconds())
 }
 
 func measureUnary(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 	start := time.Now()
 	resp, err := handler(ctx, req)
-	rpcDuration.WithLabelValues(info.FullMethod, status.Code(err).String()).Observe(time.Since(start).Seconds())
+	observe(info.FullMethod, start, err)
 	return resp, err
+}
+
+func measureStream(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+	start := time.Now()
+	err := handler(srv, ss)
+	observe(info.FullMethod, start, err)
+	return err
 }
