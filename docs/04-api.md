@@ -46,7 +46,7 @@ message PutRequest {
 
 `ttl_seconds = 0` means the node's `CACHE_DEFAULT_TTL` applies, which is itself zero by default, and zero there means the entry only ever leaves by eviction or `Delete`.
 
-Seconds rather than milliseconds, deliberately.
+The field is in seconds, not milliseconds.
 A TTL finer than the policy's own decision interval is not something a cache can honour meaningfully, and the field being coarse is what makes the HTTP layer's rejection of sub-second TTLs a clean error rather than a rounding surprise.
 
 `PutResponse.admitted = false` is **not** an error.
@@ -75,7 +75,7 @@ The counters needed to score a policy.
 | `evictions` | Objects removed to make room. |
 | `expirations` | Objects removed because a TTL passed. Kept separate on purpose: evictions mean the cache is too small, expirations mean the data was too old, and only the first is a capacity problem. |
 | `objects`, `bytes_used`, `bytes_capacity` | Current occupancy. |
-| `trace_sampled`, `trace_dropped` | A non-zero drop count means a trace ring filled, not that requests were harmed. |
+| `trace_written`, `trace_dropped` | A non-zero drop count means a trace ring filled, not that requests were harmed. |
 | `evict_ns_mean` | Mean nanoseconds to choose a victim, including one clock read. This is the number the learned policy has to keep small enough to be worth its hit-ratio gain. |
 
 From the gateway, counters are summed across nodes and `evict_ns_mean` is averaged unweighted, which is close enough when nodes are the same size and is labelled a mean rather than a percentile for that reason.
@@ -118,7 +118,7 @@ The accumulating buffer is bounded by `meta.size_bytes` rather than by trusting 
 The response opens with `meta` and then streams chunks.
 
 `WatchModels` takes `since_version` and sends an event for every model newer than it, starting immediately if the registry is already ahead.
-That is the whole reason it is a watch and not a poll: a node that restarts converges without waiting for the next training run.
+It is a watch and not a poll so that a node that restarts converges without waiting for the next training run.
 The implementation keeps no subscriber registry; every publish swaps `latest` and closes a `changed` channel, so each watcher gets exactly one wakeup per publish and a watcher that disappears leaks nothing.
 
 `ListModels` returns newest first, `limit = 0` meaning all.

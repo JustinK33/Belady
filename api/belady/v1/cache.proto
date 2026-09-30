@@ -90,10 +90,10 @@ message StatsResponse {
   uint64 bytes_used = 12;
   uint64 bytes_capacity = 13;
 
-  // Records sampled into the trace ring, and records dropped because the ring
-  // was full. A nonzero drop count means the shipper is behind, not that
-  // requests were harmed.
-  uint64 trace_sampled = 14;
+  // Records written to a trace segment, and records lost before that: dropped
+  // because a ring was full or because a segment write failed. A nonzero drop
+  // count means the trace is incomplete, not that requests were harmed.
+  uint64 trace_written = 14;
   uint64 trace_dropped = 15;
 
   // Mean nanoseconds spent choosing a victim. This is the number the learned

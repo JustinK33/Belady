@@ -157,7 +157,7 @@ func (s *server) Stats(ctx context.Context, req *beladyv1.StatsRequest) (*belady
 		out.Objects += st.GetObjects()
 		out.BytesUsed += st.GetBytesUsed()
 		out.BytesCapacity += st.GetBytesCapacity()
-		out.TraceSampled += st.GetTraceSampled()
+		out.TraceWritten += st.GetTraceWritten()
 		out.TraceDropped += st.GetTraceDropped()
 		out.EvictNs += st.GetEvictNs()
 		out.EvictSample += st.GetEvictSample()

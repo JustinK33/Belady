@@ -453,10 +453,10 @@ type StatsResponse struct {
 	Objects       uint64 `protobuf:"varint,11,opt,name=objects,proto3" json:"objects,omitempty"`
 	BytesUsed     uint64 `protobuf:"varint,12,opt,name=bytes_used,json=bytesUsed,proto3" json:"bytes_used,omitempty"`
 	BytesCapacity uint64 `protobuf:"varint,13,opt,name=bytes_capacity,json=bytesCapacity,proto3" json:"bytes_capacity,omitempty"`
-	// Records sampled into the trace ring, and records dropped because the ring
-	// was full. A nonzero drop count means the shipper is behind, not that
-	// requests were harmed.
-	TraceSampled uint64 `protobuf:"varint,14,opt,name=trace_sampled,json=traceSampled,proto3" json:"trace_sampled,omitempty"`
+	// Records written to a trace segment, and records lost before that: dropped
+	// because a ring was full or because a segment write failed. A nonzero drop
+	// count means the trace is incomplete, not that requests were harmed.
+	TraceWritten uint64 `protobuf:"varint,14,opt,name=trace_written,json=traceWritten,proto3" json:"trace_written,omitempty"`
 	TraceDropped uint64 `protobuf:"varint,15,opt,name=trace_dropped,json=traceDropped,proto3" json:"trace_dropped,omitempty"`
 	// Mean nanoseconds spent choosing a victim. This is the number the learned
 	// policy has to keep small enough to be worth its hit-ratio gain.
@@ -600,9 +600,9 @@ func (x *StatsResponse) GetBytesCapacity() uint64 {
 	return 0
 }
 
-func (x *StatsResponse) GetTraceSampled() uint64 {
+func (x *StatsResponse) GetTraceWritten() uint64 {
 	if x != nil {
-		return x.TraceSampled
+		return x.TraceWritten
 	}
 	return 0
 }
@@ -780,7 +780,7 @@ const file_belady_v1_cache_proto_rawDesc = "" +
 	"\n" +
 	"bytes_used\x18\f \x01(\x04R\tbytesUsed\x12%\n" +
 	"\x0ebytes_capacity\x18\r \x01(\x04R\rbytesCapacity\x12#\n" +
-	"\rtrace_sampled\x18\x0e \x01(\x04R\ftraceSampled\x12#\n" +
+	"\rtrace_written\x18\x0e \x01(\x04R\ftraceWritten\x12#\n" +
 	"\rtrace_dropped\x18\x0f \x01(\x04R\ftraceDropped\x12\"\n" +
 	"\revict_ns_mean\x18\x10 \x01(\x04R\vevictNsMean\x12\x19\n" +
 	"\bevict_ns\x18\x13 \x01(\x04R\aevictNs\x12!\n" +

@@ -21,6 +21,9 @@ message AccessRecord {
   int64 timestamp_us = 2;
 
   uint32 size_bytes = 3;
+
+  // false marks an admission, either after a miss or from a client Put. Both start
+  // the entry's history over.
   bool hit = 4;
 }
 

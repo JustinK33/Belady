@@ -29,9 +29,11 @@ type AccessRecord struct {
 	// Microseconds since the Unix epoch. Microsecond resolution is enough to order
 	// accesses and to compute inter-arrival deltas, and it halves the varint width
 	// compared with nanoseconds.
-	TimestampUs   int64  `protobuf:"varint,2,opt,name=timestamp_us,json=timestampUs,proto3" json:"timestamp_us,omitempty"`
-	SizeBytes     uint32 `protobuf:"varint,3,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
-	Hit           bool   `protobuf:"varint,4,opt,name=hit,proto3" json:"hit,omitempty"`
+	TimestampUs int64  `protobuf:"varint,2,opt,name=timestamp_us,json=timestampUs,proto3" json:"timestamp_us,omitempty"`
+	SizeBytes   uint32 `protobuf:"varint,3,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	// false marks an admission, either after a miss or from a client Put. Both start
+	// the entry's history over.
+	Hit           bool `protobuf:"varint,4,opt,name=hit,proto3" json:"hit,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -43,13 +44,13 @@ type server struct {
 	models *cache.ModelHolder
 	trace  *trace.Recorder
 
-	// fetches collapses concurrent misses for the same key into one origin call.
-	// Without it, a key expiring under load produces one origin request per
-	// in-flight client, which is the thundering herd that takes the origin down at
-	// the worst possible moment.
-	fetches singleflight.Group
-
-	nodeID string
+	// fetches collapses concurrent misses for the same key into one origin call,
+	// so a hot key expiring under load costs origin one request, not one per
+	// in-flight client. The call runs under its own originTimeout rather than any
+	// one caller's context, because every waiter shares its result.
+	fetches       singleflight.Group
+	nodeID        string
+	originTimeout time.Duration
 }
 
 func (s *server) Get(ctx context.Context, req *beladyv1.GetRequest) (*beladyv1.GetResponse, error) {
@@ -65,23 +66,35 @@ func (s *server) Get(ctx context.Context, req *beladyv1.GetRequest) (*beladyv1.G
 		return &beladyv1.GetResponse{Found: false, ServedBy: s.nodeID}, nil
 	}
 
-	// Do returns the shared result; only one goroutine per key reaches origin.
-	v, err, _ := s.fetches.Do(key, func() (any, error) {
-		resp, err := s.origin.Fetch(ctx, &beladyv1.FetchRequest{Key: key})
-		if err != nil {
+	fetch := s.fetches.DoChan(key, func() (any, error) {
+		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.originTimeout)
+		defer cancel()
+		resp, err := s.origin.Fetch(fctx, &beladyv1.FetchRequest{Key: key})
+		if err != nil || !resp.GetFound() {
 			return nil, err
 		}
-		if !resp.GetFound() {
-			return nil, nil
-		}
+		// Proto decodes an empty value as nil, and nil here means not found.
 		value := resp.GetValue()
+		if value == nil {
+			value = []byte{}
+		}
 		s.cache.Admit(key, value)
 		return value, nil
 	})
-	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "origin fetch failed: %v", err)
+	var res singleflight.Result
+	select {
+	case res = <-fetch:
+	case <-ctx.Done():
+		return nil, status.FromContextError(ctx.Err()).Err()
 	}
-	value, _ := v.([]byte)
+	if res.Err != nil {
+		code := status.Code(res.Err)
+		if code != codes.DeadlineExceeded {
+			code = codes.Unavailable
+		}
+		return nil, status.Errorf(code, "origin fetch failed: %v", res.Err)
+	}
+	value, _ := res.Val.([]byte)
 	if value == nil {
 		return &beladyv1.GetResponse{Found: false, ServedBy: s.nodeID}, nil
 	}
@@ -99,6 +112,9 @@ func (s *server) Put(_ context.Context, req *beladyv1.PutRequest) (*beladyv1.Put
 }
 
 func (s *server) Delete(_ context.Context, req *beladyv1.DeleteRequest) (*beladyv1.DeleteResponse, error) {
+	if req.GetKey() == "" {
+		return nil, status.Error(codes.InvalidArgument, "key must not be empty")
+	}
 	return &beladyv1.DeleteResponse{Existed: s.cache.Delete(req.GetKey())}, nil
 }
 
@@ -108,15 +124,15 @@ func (s *server) Stats(context.Context, *beladyv1.StatsRequest) (*beladyv1.Stats
 	if s.models != nil {
 		version = s.models.Version()
 	}
-	var sampled, dropped uint64
+	var written, dropped uint64
 	if s.trace != nil {
-		sampled, dropped = s.trace.Stats()
+		written, dropped = s.trace.Stats()
 	}
 	return &beladyv1.StatsResponse{
 		NodeId:        s.nodeID,
 		Policy:        st.Policy,
 		ModelVersion:  version,
-		TraceSampled:  sampled,
+		TraceWritten:  written,
 		TraceDropped:  dropped,
 		Hits:          st.Hits,
 		Misses:        st.Misses,
@@ -224,10 +240,11 @@ func main() {
 	}
 
 	srv := &server{
-		cache:  c,
-		models: models,
-		trace:  recorder,
-		nodeID: nodeID,
+		cache:         c,
+		models:        models,
+		trace:         recorder,
+		nodeID:        nodeID,
+		originTimeout: config.Duration("ORIGIN_TIMEOUT", 5*time.Second),
 	}
 
 	// An unset ORIGIN_ADDR is a supported mode, not a mistake: it is what you want
@@ -244,11 +261,12 @@ func main() {
 
 	// The learned policy is the only one that needs a model, so the registry
 	// connection follows the policy rather than being wired up unconditionally.
-	// MustDuration, not Duration: this value has to match the trainer's exactly or
-	// every model is refused, so falling back to the default on a typo would trade a
-	// startup failure for a node that serves the fallback policy forever.
-	boundary := config.MustDuration("MODEL_BOUNDARY", 10*time.Minute)
+	var boundary time.Duration
 	if models != nil {
+		// MustDuration, not Duration: this value has to match the trainer's exactly or
+		// every model is refused, so falling back to the default on a typo would trade
+		// a startup failure for a node that serves the fallback policy forever.
+		boundary = config.MustDuration("MODEL_BOUNDARY", 10*time.Minute)
 		addr := config.String("REGISTRY_ADDR", "")
 		if addr == "" {
 			// Not fatal: this is exactly the state of a fresh cluster, and running the
@@ -260,9 +278,15 @@ func main() {
 			if err != nil {
 				obs.Fatal(log, "registry dial failed", "addr", addr, "err", err)
 			}
+			// Deferred first so it runs last: the watcher must be done with the
+			// connection before it closes.
 			defer func() { _ = rconn.Close() }()
-
-			go registry.NewWatcher(rconn, models, boundary, log).Run(ctx)
+			watchDone := make(chan struct{})
+			go func() {
+				defer close(watchDone)
+				registry.NewWatcher(rconn, models, boundary, log).Run(ctx)
+			}()
+			defer func() { <-watchDone }()
 		}
 	}
 
@@ -275,7 +299,7 @@ func main() {
 	log.Info("cache node configured", "node_id", nodeID, "policy", policyName,
 		"mode", mode, "capacity", capacity, "shards", shards, "per_shard_bytes", perShard,
 		"default_ttl", defaultTTL.String(), "trace", recorder != nil,
-		"model_boundary", boundary.String())
+		"model_boundary", boundary.String(), "origin_timeout", srv.originTimeout.String())
 
 	if recorder != nil {
 		// Run owns the segment files, so it has to finish its final flush before the
@@ -292,50 +316,63 @@ func main() {
 
 	g := grpcx.NewServer()
 	beladyv1.RegisterCacheServer(g, srv)
-	if err := grpcx.Serve(ctx, config.String("GRPC_ADDR", ":8081"), g); err != nil {
+	err = grpcx.Serve(ctx, config.String("GRPC_ADDR", ":8081"), g)
+	// Cancel ctx even when Serve failed on its own, or the deferred waits on the
+	// recorder and the watcher never return.
+	stop()
+	if err != nil {
 		log.Error("serve failed", "err", err)
 	}
 }
 
-// registerCacheMetrics publishes the store's counters as gauges read on scrape.
+// registerCacheMetrics publishes the store's counters and gauges, read on scrape.
 // Collecting on demand keeps the request path free of metric updates; the store
 // already counts these under a lock it was holding anyway.
 func registerCacheMetrics(c *cache.Cache, rec *trace.Recorder) {
 	desc := func(name, help string) *prometheus.Desc {
 		return prometheus.NewDesc("belady_cache_"+name, help, nil, nil)
 	}
-	specs := []struct {
-		d   *prometheus.Desc
-		val func(cache.Stats) float64
-	}{
-		{desc("hits_total", "Requests served from cache."), func(s cache.Stats) float64 { return float64(s.Hits) }},
-		{desc("misses_total", "Requests not in cache."), func(s cache.Stats) float64 { return float64(s.Misses) }},
-		{desc("hit_bytes_total", "Bytes served from cache."), func(s cache.Stats) float64 { return float64(s.HitBytes) }},
-		{desc("miss_bytes_total", "Bytes fetched from origin."), func(s cache.Stats) float64 { return float64(s.MissBytes) }},
-		{desc("evictions_total", "Objects evicted."), func(s cache.Stats) float64 { return float64(s.Evictions) }},
-		{desc("expirations_total", "Objects dropped because their TTL passed."), func(s cache.Stats) float64 { return float64(s.Expirations) }},
-		{desc("rejections_total", "Objects refused admission."), func(s cache.Stats) float64 { return float64(s.Rejections) }},
-		{desc("objects", "Objects currently cached."), func(s cache.Stats) float64 { return float64(s.Objects) }},
-		{desc("bytes_used", "Bytes currently cached."), func(s cache.Stats) float64 { return float64(s.BytesUsed) }},
-		{desc("bytes_capacity", "Configured capacity."), func(s cache.Stats) float64 { return float64(s.BytesCapacity) }},
-		{desc("evict_ns_mean", "Mean nanoseconds to choose a victim, including one clock read."), func(s cache.Stats) float64 { return float64(s.EvictNSMean) }},
+	type spec struct {
+		d    *prometheus.Desc
+		val  func(cache.Stats) float64
+		kind prometheus.ValueType
+	}
+	metric := func(name, help string, val func(cache.Stats) float64) spec {
+		kind := prometheus.GaugeValue
+		if strings.HasSuffix(name, "_total") {
+			kind = prometheus.CounterValue
+		}
+		return spec{desc(name, help), val, kind}
+	}
+	specs := []spec{
+		metric("hits_total", "Requests served from cache.", func(s cache.Stats) float64 { return float64(s.Hits) }),
+		metric("misses_total", "Requests not in cache.", func(s cache.Stats) float64 { return float64(s.Misses) }),
+		metric("hit_bytes_total", "Bytes served from cache.", func(s cache.Stats) float64 { return float64(s.HitBytes) }),
+		metric("miss_bytes_total", "Bytes fetched from origin.", func(s cache.Stats) float64 { return float64(s.MissBytes) }),
+		metric("evictions_total", "Objects evicted.", func(s cache.Stats) float64 { return float64(s.Evictions) }),
+		metric("expirations_total", "Objects dropped because their TTL passed.", func(s cache.Stats) float64 { return float64(s.Expirations) }),
+		metric("rejections_total", "Objects refused admission.", func(s cache.Stats) float64 { return float64(s.Rejections) }),
+		metric("objects", "Objects currently cached.", func(s cache.Stats) float64 { return float64(s.Objects) }),
+		metric("bytes_used", "Bytes currently cached.", func(s cache.Stats) float64 { return float64(s.BytesUsed) }),
+		metric("bytes_capacity", "Configured capacity.", func(s cache.Stats) float64 { return float64(s.BytesCapacity) }),
+		metric("evict_ns_mean", "Mean nanoseconds to choose a victim, including one clock read.", func(s cache.Stats) float64 { return float64(s.EvictNSMean) }),
 		// The raw pair behind the mean above. Exported because the mean is over the
 		// process lifetime and cannot be windowed, so a rate() over these two is the
 		// only way to see what eviction costs now rather than on average since boot.
-		{desc("evict_ns_total", "Total nanoseconds spent choosing victims."), func(s cache.Stats) float64 { return float64(s.EvictNS) }},
-		{desc("evict_sample_total", "Victim selections timed."), func(s cache.Stats) float64 { return float64(s.EvictSample) }},
+		metric("evict_ns_total", "Total nanoseconds spent choosing victims.", func(s cache.Stats) float64 { return float64(s.EvictNS) }),
+		metric("evict_sample_total", "Victim selections timed.", func(s cache.Stats) float64 { return float64(s.EvictSample) }),
 	}
 
 	// Trace counters come from the recorder rather than the store. The dropped
 	// counter is the one that matters: it is the only signal that a model was
 	// trained on an incomplete view of the traffic.
 	written := desc("trace_written_total", "Access records written to a trace segment.")
-	dropped := desc("trace_dropped_total", "Access records discarded because a trace ring was full.")
+	dropped := desc("trace_dropped_total", "Access records lost because a trace ring was full or a segment write failed.")
 
 	obs.Registry.MustRegister(collectorFunc(func(ch chan<- prometheus.Metric) {
 		st := c.Snapshot()
 		for _, s := range specs {
-			ch <- prometheus.MustNewConstMetric(s.d, prometheus.GaugeValue, s.val(st))
+			ch <- prometheus.MustNewConstMetric(s.d, s.kind, s.val(st))
 		}
 		if rec != nil {
 			w, d := rec.Stats()
