@@ -99,8 +99,7 @@ func TestWatcherInstallsAPublishedModel(t *testing.T) {
 	})
 }
 
-// TestWatcherRefusesAMismatchedBoundary is the check that keeps a hit-ratio number
-// honest. A model trained against a different boundary answers a different question,
+// TestWatcherRefusesAMismatchedBoundary: a model trained against a different boundary answers a different question,
 // and its scores would be ranked as if it answered this node's.
 func TestWatcherRefusesAMismatchedBoundary(t *testing.T) {
 	c := dial(t, t.TempDir())

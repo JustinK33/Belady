@@ -3,11 +3,8 @@ package registry
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"time"
 
@@ -33,7 +30,7 @@ var (
 
 func init() { obs.Registry.MustRegister(modelLoads, modelFailures) }
 
-// watcher keeps the node's model current.
+// Watcher keeps the node's model current.
 //
 // It runs entirely off the request path: parsing a LightGBM dump into the flat tree
 // arrays takes milliseconds, and the swap into the holder is one atomic pointer
@@ -46,8 +43,8 @@ type Watcher struct {
 	boundary time.Duration
 }
 
-// NewWatcher returns a Watcher that installs models from the registry at addr's
-// connection into holder. boundary is the Relaxed Belady boundary this node is
+// NewWatcher returns a Watcher that installs models from the registry behind conn
+// into holder. boundary is the Relaxed Belady boundary this node is
 // configured for; a model trained against a different one is refused.
 func NewWatcher(conn grpc.ClientConnInterface, holder *cache.ModelHolder, boundary time.Duration, log *slog.Logger) *Watcher {
 	return &Watcher{
@@ -69,7 +66,7 @@ func (w *Watcher) Run(ctx context.Context) {
 
 	for ctx.Err() == nil {
 		started := time.Now()
-		err := w.watch(ctx) // Only ever returns because the stream ended, so err is never nil.
+		err := w.watch(ctx)
 		if ctx.Err() != nil {
 			return
 		}
@@ -116,7 +113,6 @@ func (w *Watcher) watch(ctx context.Context) error {
 }
 
 func (w *Watcher) install(ctx context.Context, meta *beladyv1.ModelMeta) error {
-	// Check what the registry told us before spending a download on it.
 	if err := w.compatible(meta); err != nil {
 		return err
 	}
@@ -130,19 +126,14 @@ func (w *Watcher) install(ctx context.Context, meta *beladyv1.ModelMeta) error {
 	if err := w.compatible(served); err != nil {
 		return err
 	}
-	sum := sha256.Sum256(body)
-	if got := hex.EncodeToString(sum[:]); got != served.GetSha256() {
-		return fmt.Errorf("digest mismatch: registry declared %s, received %s", served.GetSha256(), got)
-	}
 
 	start := time.Now()
 	m, err := model.Load(bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
-	// Store re-checks the feature count against this build's layout. That check and
-	// the one in compatible are not redundant: this one is against what the model
-	// file actually contains, which is the only claim that matters.
+	// Store checks the feature count against this build's layout, using what the
+	// model file contains rather than what the metadata claims.
 	if err := w.holder.Store(m, served.GetVersion(), w.boundary); err != nil {
 		return err
 	}
@@ -165,12 +156,12 @@ func (w *Watcher) install(ctx context.Context, meta *beladyv1.ModelMeta) error {
 // ten-minute boundary answers "will this object go unused for ten minutes"; the same
 // number from a ten-second model answers a different question and would be ranked as
 // if it answered the first. Nothing downstream can detect that, so it is checked here
-// against configuration the operator set deliberately.
+// against the node's own MODEL_BOUNDARY.
 func (w *Watcher) compatible(meta *beladyv1.ModelMeta) error {
 	if meta == nil {
 		return errors.New("no metadata")
 	}
-	if f := meta.GetFormat(); f != "lightgbm-text" {
+	if f := meta.GetFormat(); f != modelFormat {
 		return fmt.Errorf("unsupported format %q", f)
 	}
 	if got := time.Duration(meta.GetBoundarySeconds()) * time.Second; got != w.boundary {
@@ -179,42 +170,20 @@ func (w *Watcher) compatible(meta *beladyv1.ModelMeta) error {
 	return nil
 }
 
+// fetchTimeout bounds one model download, so a registry that stalls mid-stream
+// cannot wedge the watch loop.
+const fetchTimeout = time.Minute
+
 func (w *Watcher) fetch(ctx context.Context, version string) ([]byte, *beladyv1.ModelMeta, error) {
+	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
+	defer cancel()
 	stream, err := w.client.GetModel(ctx, &beladyv1.GetModelRequest{Version: version})
 	if err != nil {
 		return nil, nil, err
 	}
-
-	var meta *beladyv1.ModelMeta
-	var body []byte
-	for {
+	meta, body, err := receive(func() (*beladyv1.ModelMeta, []byte, error) {
 		resp, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, nil, err
-		}
-		if m := resp.GetMeta(); m != nil {
-			meta = m
-			if size := m.GetSizeBytes(); size > 0 {
-				body = make([]byte, 0, size)
-			}
-			continue
-		}
-		if meta == nil {
-			return nil, nil, errors.New("registry sent a chunk before any metadata")
-		}
-		if uint64(len(body)+len(resp.GetChunk())) > meta.GetSizeBytes() {
-			return nil, nil, fmt.Errorf("model body exceeds the declared %d bytes", meta.GetSizeBytes())
-		}
-		body = append(body, resp.GetChunk()...)
-	}
-	if meta == nil {
-		return nil, nil, errors.New("registry sent no metadata")
-	}
-	if uint64(len(body)) != meta.GetSizeBytes() {
-		return nil, nil, fmt.Errorf("declared %d bytes, received %d", meta.GetSizeBytes(), len(body))
-	}
-	return body, meta, nil
+		return resp.GetMeta(), resp.GetChunk(), err
+	})
+	return body, meta, err
 }

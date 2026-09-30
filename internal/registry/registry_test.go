@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
 	beladyv1 "github.com/JustinK33/Belady/gen/belady/v1"
@@ -277,9 +279,8 @@ func TestPublishRejectsBadMetadata(t *testing.T) {
 	}
 }
 
-// TestGetModelRejectsTraversal covers the read path. Publishing validates the
-// version because it becomes a filename, but GetModel took it straight from the
-// request, so a version of "../secret" escaped MODEL_DIR entirely.
+// TestGetModelRejectsTraversal covers the read path. The version becomes a
+// filename, so a GetModel for "../secret" must not escape MODEL_DIR.
 func TestGetModelRejectsTraversal(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, "models")
@@ -316,5 +317,60 @@ func TestGetUnknownVersionIsNotFound(t *testing.T) {
 	}
 	if _, _, err := get(t, c, ""); err == nil {
 		t.Error("getting the latest model from an empty registry succeeded")
+	}
+}
+
+// A crash between writing the body and writing the metadata leaves a .model with
+// no .meta. That half-published version must not stop the registry starting.
+func TestRestartIgnoresAModelWithNoMetadata(t *testing.T) {
+	dir := t.TempDir()
+	c := dial(t, dir)
+	body := []byte("tree=1")
+	if err := publish(t, c, metaFor("20260101T000000Z", body), body); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "20260201T000000Z"+modelExt), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := newStore(dir)
+	if err != nil {
+		t.Fatalf("restart failed: %v", err)
+	}
+	if latest, _ := st.snapshot(); latest.GetVersion() != "20260101T000000Z" {
+		t.Errorf("restart adopted %q, want the last fully published version", latest.GetVersion())
+	}
+}
+
+// Republishing a version would change the bytes behind a name watchers have
+// already installed, without telling them.
+func TestPublishRejectsAnExistingVersion(t *testing.T) {
+	c := dial(t, t.TempDir())
+	first, second := []byte("tree=1"), []byte("tree=2")
+	if err := publish(t, c, metaFor("20260101T000000Z", first), first); err != nil {
+		t.Fatal(err)
+	}
+	err := publish(t, c, metaFor("20260101T000000Z", second), second)
+	if status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("second publish: err = %v, want AlreadyExists", err)
+	}
+	if _, got, err := get(t, c, "20260101T000000Z"); err != nil || string(got) != string(first) {
+		t.Fatalf("get returned %q, %v; want the first body", got, err)
+	}
+}
+
+// The declared size sizes the receive buffer, so it has to be capped before
+// anything is allocated: 1<<62 would otherwise panic in make.
+func TestReceiveCapsTheDeclaredSize(t *testing.T) {
+	sent := false
+	_, _, err := receive(func() (*beladyv1.ModelMeta, []byte, error) {
+		if sent {
+			return nil, nil, io.EOF
+		}
+		sent = true
+		return &beladyv1.ModelMeta{SizeBytes: 1 << 62}, nil, nil
+	})
+	if !errors.Is(err, errMalformed) {
+		t.Fatalf("err = %v, want errMalformed", err)
 	}
 }

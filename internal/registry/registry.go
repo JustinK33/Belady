@@ -1,12 +1,11 @@
 // Package registry is the handoff point between the Python trainer and the Go cache
 // nodes: the trainer publishes a model, cache nodes watch for it and pull it.
 //
-// It is deliberately a directory of files with a gRPC face on it. A model is a few
-// hundred kilobytes of text published a few times a day, so the interesting
-// properties are that a half-written model can never be served, that a cache node
-// restarting picks up the current model without waiting for the next training run,
-// and that a bad model can be identified by version afterwards. None of those want a
-// database.
+// It is a directory of files behind a gRPC service. A model is a few hundred
+// kilobytes of text published a few times a day, and what matters is that a
+// half-written model is never served, that a restarting cache node picks up the
+// current model without waiting for the next training run, and that a bad model can
+// be identified by version afterwards.
 package registry
 
 import (
@@ -36,11 +35,68 @@ const (
 	metaExt  = ".meta"
 	tmpExt   = ".partial"
 
-	// chunkBytes is the streaming unit. Well under grpcx.MaxRecvBytes, because the
-	// point of chunking is that model size is unbounded in principle even though it
-	// is small in practice.
+	// chunkBytes is the streaming unit, well under grpcx.MaxRecvBytes.
 	chunkBytes = 256 << 10
+
+	// MaxModelBytes caps a model body on both ends of the wire. Models are a few
+	// hundred kilobytes; the cap bounds what a declared size can make either side
+	// allocate.
+	MaxModelBytes = 64 << 20
+
+	modelFormat = "lightgbm-text"
 )
+
+// errMalformed marks a model stream that broke the protocol, as opposed to one
+// that failed in transport.
+var errMalformed = errors.New("malformed model stream")
+
+func malformed(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", errMalformed, fmt.Sprintf(format, args...))
+}
+
+// receive reassembles a model stream: metadata first, then chunks up to the
+// declared size, and a digest that matches. next returns io.EOF at the end.
+func receive(next func() (*beladyv1.ModelMeta, []byte, error)) (*beladyv1.ModelMeta, []byte, error) {
+	var meta *beladyv1.ModelMeta
+	var body []byte
+	for {
+		m, chunk, err := next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		switch {
+		case m != nil:
+			if meta != nil {
+				return nil, nil, malformed("metadata sent twice")
+			}
+			if m.GetSizeBytes() > MaxModelBytes {
+				return nil, nil, malformed("declared %d bytes, over the %d byte limit", m.GetSizeBytes(), MaxModelBytes)
+			}
+			meta = m
+			body = make([]byte, 0, m.GetSizeBytes())
+		case meta == nil:
+			return nil, nil, malformed("first message must carry metadata")
+		case uint64(len(body)+len(chunk)) > meta.GetSizeBytes():
+			return nil, nil, malformed("model body exceeds the declared %d bytes", meta.GetSizeBytes())
+		default:
+			body = append(body, chunk...)
+		}
+	}
+	if meta == nil {
+		return nil, nil, malformed("no metadata")
+	}
+	if uint64(len(body)) != meta.GetSizeBytes() {
+		return nil, nil, malformed("declared %d bytes, received %d", meta.GetSizeBytes(), len(body))
+	}
+	sum := sha256.Sum256(body)
+	if got := hex.EncodeToString(sum[:]); got != meta.GetSha256() {
+		return nil, nil, malformed("sha256 mismatch: declared %s, computed %s", meta.GetSha256(), got)
+	}
+	return meta, body, nil
+}
 
 // store is a versioned directory of models.
 //
@@ -55,6 +111,9 @@ type store struct {
 
 	// mu guards latest and changed. dir is set once at construction.
 	mu sync.Mutex
+	// publishing serialises publishes, so two of the same version cannot both pass
+	// the existence check.
+	publishing sync.Mutex
 }
 
 func newStore(dir string) (*store, error) {
@@ -79,8 +138,9 @@ func newStore(dir string) (*store, error) {
 	return s, nil
 }
 
-// versions lists the models on disk, oldest first. Versions are timestamps in a
-// sortable form, so lexical order is publication order.
+// versions lists the published models, oldest first. Versions are timestamps in a
+// sortable form, so lexical order is publication order. The metadata file is
+// written last, so a version without one never finished publishing.
 func (s *store) versions() ([]string, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
@@ -88,7 +148,7 @@ func (s *store) versions() ([]string, error) {
 	}
 	var out []string
 	for _, e := range entries {
-		if name, ok := strings.CutSuffix(e.Name(), modelExt); ok {
+		if name, ok := strings.CutSuffix(e.Name(), metaExt); ok {
 			out = append(out, name)
 		}
 	}
@@ -120,13 +180,23 @@ func (s *store) snapshot() (*beladyv1.ModelMeta, <-chan struct{}) {
 	return s.latest, s.changed
 }
 
+var errExists = errors.New("version already published")
+
 // publish writes the model and its metadata, then makes it visible.
 //
 // The model file is renamed into place before the metadata is written, and the
 // metadata is what readers look for, so a reader can never find a version whose
 // bytes are still arriving.
 func (s *store) publish(meta *beladyv1.ModelMeta, body []byte) error {
+	s.publishing.Lock()
+	defer s.publishing.Unlock()
+
 	modelPath, metaPath := s.paths(meta.GetVersion())
+	if _, err := os.Stat(metaPath); err == nil {
+		return errExists
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	if err := writeAtomic(modelPath, body); err != nil {
 		return err
 	}
@@ -164,41 +234,25 @@ type Server struct {
 }
 
 func (s *Server) PublishModel(stream beladyv1.Registry_PublishModelServer) error {
-	var meta *beladyv1.ModelMeta
-	var body []byte
-
-	for {
+	meta, body, err := receive(func() (*beladyv1.ModelMeta, []byte, error) {
 		req, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			break
-		}
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 		switch payload := req.GetPayload().(type) {
 		case *beladyv1.PublishModelRequest_Meta:
-			if meta != nil {
-				return status.Error(codes.InvalidArgument, "metadata sent twice")
-			}
-			meta = payload.Meta
+			return payload.Meta, nil, nil
 		case *beladyv1.PublishModelRequest_Chunk:
-			if meta == nil {
-				return status.Error(codes.InvalidArgument, "first message must carry metadata")
-			}
-			if len(body)+len(payload.Chunk) > int(meta.GetSizeBytes()) {
-				// Bound the buffer by the declared size rather than trusting the stream to
-				// end: an unbounded append here is a memory exhaustion primitive.
-				return status.Errorf(codes.InvalidArgument, "model body exceeds the declared %d bytes",
-					meta.GetSizeBytes())
-			}
-			body = append(body, payload.Chunk...)
+			return nil, payload.Chunk, nil
 		default:
-			return status.Error(codes.InvalidArgument, "empty payload")
+			return nil, nil, malformed("empty payload")
 		}
+	})
+	if errors.Is(err, errMalformed) {
+		return status.Error(codes.InvalidArgument, err.Error())
 	}
-
-	if meta == nil {
-		return status.Error(codes.InvalidArgument, "no metadata")
+	if err != nil {
+		return err
 	}
 	if err := validate(meta, body); err != nil {
 		return status.Error(codes.InvalidArgument, err.Error())
@@ -206,7 +260,9 @@ func (s *Server) PublishModel(stream beladyv1.Registry_PublishModelServer) error
 	if meta.GetCreatedUnix() == 0 {
 		meta.CreatedUnix = time.Now().Unix()
 	}
-	if err := s.store.publish(meta, body); err != nil {
+	if err := s.store.publish(meta, body); errors.Is(err, errExists) {
+		return status.Errorf(codes.AlreadyExists, "version %s is already published", meta.GetVersion())
+	} else if err != nil {
 		return status.Errorf(codes.Internal, "publish failed: %v", err)
 	}
 
@@ -225,7 +281,7 @@ func validVersion(version string) error {
 		return errors.New("version is required")
 	case len(version) > 64:
 		return errors.New("version is too long")
-	case version != filepath.Base(version), strings.ContainsAny(version, `/\.`):
+	case strings.ContainsAny(version, `/\.`):
 		return fmt.Errorf("version %q is not a bare name", version)
 	}
 	return nil
@@ -233,12 +289,13 @@ func validVersion(version string) error {
 
 // validate is the trust boundary. The trainer is a separate process in another
 // language, so everything it asserts about the blob is checked here rather than
-// assumed, and version is checked as a path component because it becomes a filename.
+// assumed; receive has already checked the size and digest. version is checked as a
+// path component because it becomes a filename.
 func validate(meta *beladyv1.ModelMeta, body []byte) error {
 	if err := validVersion(meta.GetVersion()); err != nil {
 		return err
 	}
-	if f := meta.GetFormat(); f != "lightgbm-text" {
+	if f := meta.GetFormat(); f != modelFormat {
 		return fmt.Errorf("unsupported format %q", f)
 	}
 	if meta.GetFeatureCount() == 0 {
@@ -249,13 +306,6 @@ func validate(meta *beladyv1.ModelMeta, body []byte) error {
 	}
 	if len(body) == 0 {
 		return errors.New("model body is empty")
-	}
-	if uint64(len(body)) != meta.GetSizeBytes() {
-		return fmt.Errorf("declared %d bytes, received %d", meta.GetSizeBytes(), len(body))
-	}
-	sum := sha256.Sum256(body)
-	if got := hex.EncodeToString(sum[:]); got != meta.GetSha256() {
-		return fmt.Errorf("sha256 mismatch: declared %s, computed %s", meta.GetSha256(), got)
 	}
 	return nil
 }
@@ -314,9 +364,8 @@ func (s *Server) GetModel(req *beladyv1.GetModelRequest, stream beladyv1.Registr
 }
 
 // WatchModels sends an event for every model newer than the watcher's version,
-// starting with one immediately if the registry is already ahead. A cache node that
-// restarts therefore converges without waiting for the next training run, which is
-// the whole reason this is a watch rather than a poll.
+// starting with one immediately if the registry is already ahead, so a restarting
+// cache node converges without waiting for the next training run.
 func (s *Server) WatchModels(req *beladyv1.WatchModelsRequest, stream beladyv1.Registry_WatchModelsServer) error {
 	seen := req.GetSinceVersion()
 	for {
