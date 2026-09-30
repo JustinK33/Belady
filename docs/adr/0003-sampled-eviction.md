@@ -36,7 +36,7 @@ This is the same trick Redis uses for its sampled LRU, and the measured gap to B
 Rejected on the arithmetic above: it moves cost onto the hit path to buy victim quality that the hit-ratio numbers say is worth under a point.
 
 **A CLOCK or segmented-LRU approximation**, which is cheaper still.
-Rejected because the whole point is to evaluate a *learned* score per candidate, and an approximation that never materialises a comparable score per object has nowhere to put the model.
+Rejected because the goal is to evaluate a *learned* score per candidate, and an approximation that never materialises a comparable score per object has nowhere to put the model.
 
 ## Known ceiling
 

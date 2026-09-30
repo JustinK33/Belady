@@ -1,8 +1,4 @@
-# := set in stone
-# = lazy one and doesnt compute until used
-# ?= uses default value if there isnt one provided
-
-.DEFAULT_GOAL := help # this is what command runs if we just run "make" without any parameters
+.DEFAULT_GOAL := help
 SHELL := /bin/bash
 GO ?= go
 BIN := bin
@@ -110,12 +106,12 @@ up-dev: ## Bring up the cluster with host-visible traces, models and node ports
 # trainer or observability: the cache on its own, for using rather than measuring.
 .PHONY: up-min
 up-min: ## Bring up a single cache node behind the gateway's HTTP API
-	@test -n "$$HTTP_AUTH_TOKEN" || { \
-	  echo "HTTP_AUTH_TOKEN is unset. Generate one with:"; \
-	  echo "  export HTTP_AUTH_TOKEN=\$$(openssl rand -hex 32)"; \
+	@$(LOAD_ENV); test -n "$$HTTP_AUTH_TOKEN" || { \
+	  echo "HTTP_AUTH_TOKEN is unset. Generate one and keep it in .env:"; \
+	  echo "  echo HTTP_AUTH_TOKEN=\$$(openssl rand -hex 32) >> .env"; \
 	  exit 2; }
 	$(COMPOSE_MIN) up -d --build
-	@./scripts/wait-for-health.sh gateway
+	@$(LOAD_ENV); ./scripts/wait-for-health.sh gateway
 	@$(LOAD_ENV); \
 	 echo "http  localhost:$${GATEWAY_HTTP_PORT:-8090}  (bearer token required)"; \
 	 echo "grpc  localhost:$${GATEWAY_PORT:-8080}"
@@ -126,7 +122,7 @@ down-min: ## Tear down the minimal stack
 
 .PHONY: wait
 wait: ## Block until every service reports healthy
-	@./scripts/wait-for-health.sh
+	@$(LOAD_ENV); ./scripts/wait-for-health.sh
 
 .PHONY: down
 down: ## Tear down the cluster and its volumes
@@ -157,5 +153,5 @@ train-compose: ## Train inside the cluster, reading the traces volume
 	$(COMPOSE) --profile train run --rm --build trainer train
 
 .PHONY: clean
-clean:
+clean: ## Remove build output and coverage
 	rm -rf $(BIN) coverage.txt

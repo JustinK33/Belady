@@ -161,7 +161,7 @@ jobs:
       - name: Assert every node installed the model
         run: |
           sleep 5
-          for port in 9201 9202 9203; do
+          for port in "${CACHENODE_0_DEBUG_PORT:-9201}" "${CACHENODE_1_DEBUG_PORT:-9202}" "${CACHENODE_2_DEBUG_PORT:-9203}"; do
             loads=$(curl -fsS "http://localhost:$port/metrics" | awk '/^belady_model_loads_total /{print $2}')
             failures=$(curl -fsS "http://localhost:$port/metrics" | awk '/^belady_model_load_failures_total /{print $2}')
             echo "port $port: ${loads:-0} loads, ${failures:-0} failures"

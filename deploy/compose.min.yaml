@@ -51,7 +51,7 @@ services:
       GRPC_ADDR: ":8080"
       DEBUG_ADDR: ":9090"
       HTTP_ADDR: ":8090"
-      HTTP_AUTH_TOKEN: ${HTTP_AUTH_TOKEN:?set HTTP_AUTH_TOKEN, for example in deploy/.env}
+      HTTP_AUTH_TOKEN: ${HTTP_AUTH_TOKEN:?set HTTP_AUTH_TOKEN, for example in the repo-root .env}
       HTTP_TIMEOUT: ${HTTP_TIMEOUT:-5s}
       CACHE_NODES: cachenode:8081
       MAX_INFLIGHT: ${MAX_INFLIGHT:-4096}

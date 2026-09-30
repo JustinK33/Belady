@@ -2,8 +2,7 @@
 # Poll every container's health endpoint from the host until all answer 200.
 #
 # The service images are distroless, so they contain no shell and no curl and a
-# Compose healthcheck has nothing to run. Polling from outside is the whole
-# reason the debug ports are published.
+# Compose healthcheck has nothing to run. That is why the debug ports are published.
 set -euo pipefail
 
 TIMEOUT="${TIMEOUT:-90}"

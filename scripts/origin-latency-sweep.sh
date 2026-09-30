@@ -10,7 +10,7 @@
 # in cmd/origin/main.go, so every point serves byte-identical objects and the only
 # thing moving between them is the cost of a miss.
 #
-# What this deliberately does not do is train. The models volume must already hold
+# This does not train. The models volume must already hold
 # exactly one model, because two fits of the same trace give different tree counts
 # (13 versus 41 at the same boundary), and retraining mid-sweep would put a
 # different model on each half of one curve. Run the reproduce block in
@@ -105,10 +105,9 @@ if [[ -z ${TARGET_ADDR:-} ]]; then
   export TARGET_ADDR
 fi
 
-# The load-bearing configuration, defaulting to the pinned block in
-# docs/03-performance.md. None of these are the committed defaults, which is exactly
-# why the script owns them: the five defects that pass found all came from parameters
-# that were load-bearing and set by no documented command.
+# The configuration the results depend on, defaulting to the pinned block in
+# docs/03-performance.md. None of these are the committed defaults, so the script
+# sets them rather than relying on whatever the environment holds.
 export CACHE_CAPACITY=${CACHE_CAPACITY:-6MiB}
 export CACHE_SHARDS=${CACHE_SHARDS:-32}
 export MODEL_BOUNDARY=${MODEL_BOUNDARY:-1s}

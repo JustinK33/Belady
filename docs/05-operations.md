@@ -59,6 +59,7 @@ Durations are Go duration strings: `250ms`, `30s`, `10m`, `1h30m`.
 | `DEBUG_ADDR` | `:9090` | `/metrics`, `/healthz`, pprof |
 | `NODE_ID` | hostname | Appears in `served_by` and in trace segment names |
 | `ORIGIN_ADDR` | unset | **Set means read-through; unset means cache-aside.** No default on purpose |
+| `ORIGIN_TIMEOUT` | `5s` | Bound on one origin fetch, shared by every request waiting on that key |
 | `REGISTRY_ADDR` | unset | Only consulted when the policy is `lrb` |
 | `CACHE_POLICY` | `s3fifo` | `lru`, `lfu`, `s3fifo`, `lrb`. An unknown value is fatal |
 | `CACHE_CAPACITY` | `256MiB` | Split evenly across shards |
@@ -94,7 +95,7 @@ Durations are Go duration strings: `250ms`, `30s`, `10m`, `1h30m`.
 
 `origin` takes `ORIGIN_LATENCY` (2ms), `ORIGIN_JITTER` (1ms), `ORIGIN_MIN_SIZE` (512), `ORIGIN_MAX_SIZE` (65536) and `ORIGIN_SIZE_ALPHA` (1.5), the Pareto shape.
 
-`loadgen` takes `TARGET_ADDR`, `REQUESTS`, `KEYSPACE`, `CONCURRENCY`, `WARMUP`, `ZIPF_S`, `SEED`, plus the two gate thresholds `MIN_OBJECT_HIT` and `MAX_P99`.
+`loadgen` takes `TARGET_ADDR`, `REQUESTS`, `KEYSPACE`, `CONCURRENCY`, `WARMUP`, `ZIPF_S`, `SEED`, `RPC_TIMEOUT` (default `5s`), plus the two gate thresholds `MIN_OBJECT_HIT` and `MAX_P99`.
 Zero on either gate means report only.
 `ZIPF_S` must be greater than 1.
 `REPORT_JSON=true` replaces the human report with one flat JSON object on stdout, which is how the origin-latency sweep reads a run; progress lines are on stderr either way, and the gate behaves identically.
@@ -328,5 +329,5 @@ go tool pprof -http=: http://localhost:9201/debug/pprof/heap
 curl -o trace.out 'http://localhost:9201/debug/pprof/trace?seconds=5'
 ```
 
-The first of those is what closed the eviction-cost gap: it puts `model.Raw` at 74% of `lrb.Victim`, against 16% for feature extraction and 10% for sampling, which ruled out both of the optimisations that gap used to imply.
+The first of those is what closed the eviction-cost gap: it puts `model.Raw` at 74% of `lrb.Victim`, against 16% for feature extraction and 10% for sampling, which ruled out both of the optimisations that gap seemed to call for.
 [03-performance.md](03-performance.md) has the split and what came of it.

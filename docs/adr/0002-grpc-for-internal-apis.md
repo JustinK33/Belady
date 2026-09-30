@@ -34,7 +34,7 @@ Changing it invalidates comparability with every recorded run, so this decision 
 
 ## What was given up
 
-**Not REST.** REST was never the competing option for internal calls; it is strictly worse here, adding per-request JSON encoding to a path whose whole point is microsecond accounting, and turning the model watch into hand-rolled SSE or long-polling with reconnect and backoff logic.
+**Not REST.** REST was never the competing option for internal calls; it is strictly worse here, adding per-request JSON encoding to a path built around microsecond accounting, and turning the model watch into hand-rolled SSE or long-polling with reconnect and backoff logic.
 It earned a place as the *external* surface, which is a different job.
 
 **A purpose-built binary protocol** is the alternative that could have won.
