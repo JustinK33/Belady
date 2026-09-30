@@ -2,6 +2,7 @@ package trace
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -398,6 +399,16 @@ func BenchmarkRingPush(b *testing.B) {
 // read-only one, so the next write fails. The lost batch has to show up as
 // dropped, and the records already written have to stay readable.
 func TestRecorderCountsAndRecoversFromAFailedWrite(t *testing.T) {
+	// When the truncate fails as well, the segment is published torn: readers drop a
+	// torn tail and keep every whole frame before it.
+	for _, truncateFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("truncateFails=%v", truncateFails), func(t *testing.T) {
+			testRecoversFromAFailedWrite(t, truncateFails)
+		})
+	}
+}
+
+func testRecoversFromAFailedWrite(t *testing.T, truncateFails bool) {
 	dir := t.TempDir()
 	r := newRecorder(t, Config{Dir: dir, Shards: 1})
 	push := func(from, n int) {
@@ -417,6 +428,11 @@ func TestRecorderCountsAndRecoversFromAFailedWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.file = ro
+	if truncateFails {
+		if err := os.Chmod(r.path+tmpExtension, 0o400); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	push(10, 5)
 	if err := r.drainAll(); err == nil {

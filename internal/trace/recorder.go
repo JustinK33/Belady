@@ -14,6 +14,7 @@ package trace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -291,16 +292,14 @@ func (r *Recorder) closeSegment() error {
 
 // truncateSegment closes the open segment and publishes only its first r.size
 // bytes, which are whole frames. It works by path, because the handle that failed
-// the write may fail the truncate too.
+// the write may fail the truncate too. If it does, the segment is published torn
+// anyway: readers drop a torn tail, and the frames before it are already counted.
 func (r *Recorder) truncateSegment() error {
 	f, path, size := r.file, r.path, r.size
 	r.file, r.path, r.size = nil, "", 0
 
 	_ = f.Close()
-	if err := os.Truncate(path+tmpExtension, size); err != nil {
-		return err
-	}
-	return r.publish(path, size)
+	return errors.Join(os.Truncate(path+tmpExtension, size), r.publish(path, size))
 }
 
 func (r *Recorder) publish(path string, size int64) error {
