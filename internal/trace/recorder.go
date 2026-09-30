@@ -1,16 +1,15 @@
 // Package trace samples the access stream a cache node serves and writes it where
 // the trainer can find it.
 //
-// The shape of this is dictated by one constraint: nothing here may slow down a
-// request. So the request path does a bounded, lock-free push into a per-shard ring
-// and returns; a single background goroutine drains every ring, batches, and writes
-// segment files. When the writer cannot keep up, records are dropped and counted.
+// Nothing here may slow down a request. The request path does a bounded, lock-free
+// push into a per-shard ring and returns; one background goroutine drains every
+// ring, batches, and writes segment files. When the writer cannot keep up, records
+// are dropped and counted.
 //
-// Segment files rather than a gRPC stream to the trainer, deliberately. Training runs
-// minutes behind serving, so a streaming collector would add a network dependency,
-// a backpressure question, and an availability risk to a pipeline whose whole point
-// is that it is offline. A directory of finished files is also directly replayable,
-// which is what makes a bad model reproducible instead of gone.
+// Segment files rather than a gRPC stream to the trainer: training runs minutes
+// behind serving, so a streaming collector would add a network dependency,
+// backpressure and an availability risk to an offline pipeline. A directory of
+// finished files can also be replayed, so a bad model can be reproduced.
 package trace
 
 import (
@@ -70,8 +69,10 @@ type Recorder struct {
 	cfg Config
 
 	// written counts records that reached a segment file, which is the number the
-	// trainer will actually see. It is not the ring's pushed count.
+	// trainer will actually see. It is not the ring's pushed count. lost counts
+	// records drained from a ring whose write failed.
 	written  atomic.Uint64
+	lost     atomic.Uint64
 	size     int64
 	sequence uint64
 }
@@ -141,7 +142,8 @@ func (r *Recorder) Shards() int { return len(r.rings) }
 // Ring hands a shard its own ring. Called once per shard at construction.
 func (r *Recorder) Ring(i int) *Ring { return r.rings[i] }
 
-// Stats reports records written to disk and records dropped because a ring was full.
+// Stats reports records written to disk and records dropped, either because a ring
+// was full or because their write failed.
 // Both are exported as metrics: a rising drop count is the signal that the sample
 // rate or the ring is wrong, and it has to be visible before the model trained on
 // that trace is trusted.
@@ -150,7 +152,7 @@ func (r *Recorder) Stats() (written, dropped uint64) {
 		_, d := ring.counters()
 		dropped += d
 	}
-	return r.written.Load(), dropped
+	return r.written.Load(), dropped + r.lost.Load()
 }
 
 // Run drains the rings until ctx is cancelled, then flushes and closes the open
@@ -191,6 +193,7 @@ func (r *Recorder) drainAll() error {
 				break
 			}
 			if err := r.writeBatch(i, r.scratch[:n]); err != nil {
+				r.lost.Add(uint64(n))
 				return err
 			}
 			if n < len(r.scratch) {
@@ -212,9 +215,6 @@ func (r *Recorder) writeBatch(shard int, recs []Record) error {
 	}
 	r.batch.Records = r.batch.Records[:len(recs)]
 	for i, rec := range recs {
-		if r.batch.Records[i] == nil {
-			r.batch.Records[i] = &beladyv1.AccessRecord{}
-		}
 		out := r.batch.Records[i]
 		out.KeyHash = rec.KeyHash
 		out.TimestampUs = rec.TimestampUS
@@ -238,17 +238,21 @@ func (r *Recorder) writeBatch(shard int, recs []Record) error {
 	// self-delimiting, so a file of concatenated messages cannot be split back apart
 	// without this.
 	frame := protowire.AppendVarint(nil, uint64(len(encoded)))
-	if _, err := r.file.Write(frame); err != nil {
-		return err
-	}
-	if _, err := r.file.Write(encoded); err != nil {
+	if _, err := r.file.Write(append(frame, encoded...)); err != nil {
+		// A short write leaves half a frame on disk, and every frame after it would
+		// be unreadable. Cut the file back to the last whole frame and publish that.
+		if cerr := r.truncateSegment(); cerr != nil {
+			r.log.Error("trace segment could not be recovered after a failed write", "err", cerr)
+		}
 		return err
 	}
 
 	r.size += int64(len(frame) + len(encoded))
 	r.written.Add(uint64(len(recs)))
 	if r.size >= r.cfg.SegmentBytes {
-		return r.closeSegment()
+		if err := r.closeSegment(); err != nil {
+			r.log.Error("trace segment rotation failed", "err", err)
+		}
 	}
 	return nil
 }
@@ -282,6 +286,24 @@ func (r *Recorder) closeSegment() error {
 	if err := f.Close(); err != nil {
 		return err
 	}
+	return r.publish(path, size)
+}
+
+// truncateSegment closes the open segment and publishes only its first r.size
+// bytes, which are whole frames. It works by path, because the handle that failed
+// the write may fail the truncate too.
+func (r *Recorder) truncateSegment() error {
+	f, path, size := r.file, r.path, r.size
+	r.file, r.path, r.size = nil, "", 0
+
+	_ = f.Close()
+	if err := os.Truncate(path+tmpExtension, size); err != nil {
+		return err
+	}
+	return r.publish(path, size)
+}
+
+func (r *Recorder) publish(path string, size int64) error {
 	if size == 0 {
 		return os.Remove(path + tmpExtension)
 	}

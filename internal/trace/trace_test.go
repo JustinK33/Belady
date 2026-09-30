@@ -143,9 +143,9 @@ func TestRingSamplesByKey(t *testing.T) {
 		}
 	}
 
-	// Roughly one key in eight, with slack for the hash-independent test keys used
-	// here being exactly divisible.
-	if len(kept) < 300 || len(kept) > 700 {
+	// One key in eight. The sampling hash is deterministic, so this keeps exactly
+	// 500; the band only allows for a change of hash.
+	if len(kept) < 450 || len(kept) > 550 {
 		t.Errorf("kept %d of 4000 keys, want about %d", len(kept), 4000/denom)
 	}
 }
@@ -391,5 +391,58 @@ func BenchmarkRingPush(b *testing.B) {
 	for b.Loop() {
 		r.Push(Record{KeyHash: i, TimestampUS: int64(i), SizeBytes: 512})
 		i++
+	}
+}
+
+// TestRecorderCountsAndRecoversFromAFailedWrite swaps the segment's handle for a
+// read-only one, so the next write fails. The lost batch has to show up as
+// dropped, and the records already written have to stay readable.
+func TestRecorderCountsAndRecoversFromAFailedWrite(t *testing.T) {
+	dir := t.TempDir()
+	r := newRecorder(t, Config{Dir: dir, Shards: 1})
+	push := func(from, n int) {
+		for i := range n {
+			r.Ring(0).Push(Record{KeyHash: uint64(from + i), SizeBytes: 10})
+		}
+	}
+
+	push(0, 10)
+	if err := r.drainAll(); err != nil {
+		t.Fatal(err)
+	}
+	good := r.file
+	defer func() { _ = good.Close() }()
+	ro, err := os.Open(r.path + tmpExtension)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.file = ro
+
+	push(10, 5)
+	if err := r.drainAll(); err == nil {
+		t.Fatal("a write to a read-only handle succeeded")
+	}
+	push(15, 7)
+	if err := r.drainAll(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.closeSegment(); err != nil {
+		t.Fatal(err)
+	}
+
+	written, dropped := r.Stats()
+	if written != 17 || dropped != 5 {
+		t.Fatalf("written=%d dropped=%d, want 17 and 5", written, dropped)
+	}
+	batches, err := ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	for _, b := range batches {
+		count += len(b.GetRecords())
+	}
+	if count != 17 {
+		t.Errorf("segments hold %d records, want 17", count)
 	}
 }

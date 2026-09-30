@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 )
 
-// Record is one access, and is deliberately 24 bytes with no pointers: the ring is
+// Record is one access, 24 bytes with no pointers: the ring is
 // an array of these, so the drain loop is a straight memory copy and the garbage
 // collector never has to scan it.
 type Record struct {
@@ -24,7 +24,7 @@ const cacheLine = 64
 
 // Ring is a bounded single-producer single-consumer queue.
 //
-// Single-producer is not an assumption, it is enforced by where this lives: one Ring
+// Single-producer holds by construction rather than by any check here: one Ring
 // belongs to one cache shard and is only ever pushed to with that shard's lock held,
 // so pushes to a given ring are already serialised. The consumer is the recorder's
 // one drain goroutine.

@@ -14,8 +14,8 @@ import (
 	beladyv1 "github.com/JustinK33/Belady/gen/belady/v1"
 )
 
-// Segments lists the finished segment files in dir, oldest first. The names carry a
-// nanosecond timestamp, so lexical order is chronological order.
+// Segments lists the finished segment files in dir in name order. Names are
+// <node>-<unix nanos>, so each node's segments come out oldest first.
 func Segments(dir string) ([]string, error) {
 	paths, err := filepath.Glob(filepath.Join(dir, "*"+Extension))
 	if err != nil {
@@ -28,8 +28,7 @@ func Segments(dir string) ([]string, error) {
 // ReadFile decodes every batch in one segment.
 //
 // This exists for tests and for the Go side of any offline scoring. The trainer reads
-// the same framing in Python; both sides are short because the framing is deliberately
-// boring.
+// the same framing in Python.
 func ReadFile(path string) ([]*beladyv1.AccessBatch, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // operator-supplied trace directory
 	if err != nil {
@@ -60,8 +59,8 @@ func ReadFile(path string) ([]*beladyv1.AccessBatch, error) {
 	return batches, nil
 }
 
-// ReadDir decodes every finished segment in dir in order, skipping nothing silently:
-// a corrupt segment stops the read and is reported.
+// ReadDir decodes every finished segment in dir in Segments order. A corrupt
+// segment stops the read and is reported.
 func ReadDir(dir string) ([]*beladyv1.AccessBatch, error) {
 	paths, err := Segments(dir)
 	if err != nil {
