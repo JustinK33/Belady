@@ -17,20 +17,22 @@ package cache
 // whole class of dangling-pointer bug.
 //
 // A removed key's slot stays queued until it is popped, so a key that is removed
-// and re-admitted can appear more than once. inS and inM say which queue a key
-// really belongs to, and a slot whose key is not in its queue's set is skipped.
+// and re-admitted can appear more than once, even in the same queue. Every slot
+// carries a generation, inS and inM map each key to the generation of its one live
+// slot, and any other slot is skipped.
 type s3fifo struct {
-	inS map[uint64]struct{}
-	inM map[uint64]struct{}
+	inS map[uint64]uint64
+	inM map[uint64]uint64
 	inG map[uint64]struct{}
 	// Sliding-window slices: popping advances the header and append reallocates
 	// once capacity runs out, so live memory stays within a small factor of the
 	// queue length.
 	// ponytail: a ring buffer would be tighter; not worth it until a heap profile
 	// says these slices matter.
-	small []uint64
-	main  []uint64
+	small []slot
+	main  []slot
 	ghost []uint64
+	gen   uint64
 
 	smallBytes  int64
 	smallTarget int64
@@ -55,8 +57,8 @@ func NewS3FIFO(shardCapacityBytes int64) Policy {
 		ghost = 16
 	}
 	return &s3fifo{
-		inS:         make(map[uint64]struct{}),
-		inM:         make(map[uint64]struct{}),
+		inS:         make(map[uint64]uint64),
+		inM:         make(map[uint64]uint64),
 		inG:         make(map[uint64]struct{}),
 		smallTarget: target,
 		ghostTarget: ghost,
@@ -73,15 +75,11 @@ func (p *s3fifo) OnAdmit(e *Entry) {
 	if _, seen := p.inG[e.key]; seen {
 		// Seen before and requested again: skip probation entirely.
 		delete(p.inG, e.key)
-		p.main = append(p.main, e.key)
-		p.inM[e.key] = struct{}{}
-		p.main = compact(p.main, p.inM)
+		p.main = compact(p.push(p.main, p.inM, e.key), p.inM)
 		e.freq = 0
 		return
 	}
-	p.small = append(p.small, e.key)
-	p.inS[e.key] = struct{}{}
-	p.small = compact(p.small, p.inS)
+	p.small = compact(p.push(p.small, p.inS, e.key), p.inS)
 	p.smallBytes += int64(e.size)
 	e.freq = 0
 }
@@ -94,23 +92,34 @@ func (p *s3fifo) OnRemove(e *Entry) {
 	delete(p.inM, e.key)
 }
 
-// compact drops stale and duplicate slots once they outnumber the live ones, so
-// Put/Delete churn on a cache that never fills cannot grow a queue without bound.
-func compact(q []uint64, live map[uint64]struct{}) []uint64 {
+type slot struct {
+	key uint64
+	gen uint64
+}
+
+// push queues key under a fresh generation, which makes any older slot for it stale.
+func (p *s3fifo) push(q []slot, live map[uint64]uint64, key uint64) []slot {
+	p.gen++
+	live[key] = p.gen
+	return append(q, slot{key, p.gen})
+}
+
+func isLive(s slot, live map[uint64]uint64) bool {
+	gen, ok := live[s.key]
+	return ok && gen == s.gen
+}
+
+// compact drops stale slots once they outnumber the live ones, so Put/Delete churn
+// on a cache that never fills cannot grow a queue without bound.
+func compact(q []slot, live map[uint64]uint64) []slot {
 	if len(q) <= 2*len(live)+64 {
 		return q
 	}
-	seen := make(map[uint64]struct{}, len(live))
-	out := make([]uint64, 0, len(live))
-	for _, key := range q {
-		if _, ok := live[key]; !ok {
-			continue
+	out := make([]slot, 0, len(live))
+	for _, s := range q {
+		if isLive(s, live) {
+			out = append(out, s)
 		}
-		if _, dup := seen[key]; dup {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, key)
 	}
 	return out
 }
@@ -151,12 +160,13 @@ func (p *s3fifo) Victim(c Candidates, _ int64) (uint64, bool) {
 }
 
 func (p *s3fifo) stepSmall(c Candidates) (uint64, bool) {
-	key := p.small[0]
+	s := p.small[0]
 	p.small = p.small[1:]
 
-	if _, ok := p.inS[key]; !ok {
+	if !isLive(s, p.inS) {
 		return 0, false
 	}
+	key := s.key
 	e, live := c.Lookup(key)
 	if !live {
 		return 0, false
@@ -166,8 +176,7 @@ func (p *s3fifo) stepSmall(c Candidates) (uint64, bool) {
 
 	if e.freq > 0 {
 		// Requested again during probation: promote rather than evict.
-		p.main = append(p.main, key)
-		p.inM[key] = struct{}{}
+		p.main = p.push(p.main, p.inM, key)
 		e.freq = 0
 		return 0, false
 	}
@@ -177,12 +186,13 @@ func (p *s3fifo) stepSmall(c Candidates) (uint64, bool) {
 }
 
 func (p *s3fifo) stepMain(c Candidates) (uint64, bool) {
-	key := p.main[0]
+	s := p.main[0]
 	p.main = p.main[1:]
 
-	if _, ok := p.inM[key]; !ok {
+	if !isLive(s, p.inM) {
 		return 0, false
 	}
+	key := s.key
 	e, live := c.Lookup(key)
 	if !live {
 		return 0, false
@@ -191,7 +201,7 @@ func (p *s3fifo) stepMain(c Candidates) (uint64, bool) {
 		// One more lap, with a smaller claim on survival. This is CLOCK's
 		// second-chance rule, applied to a FIFO.
 		e.freq--
-		p.main = append(p.main, key)
+		p.main = append(p.main, s)
 		return 0, false
 	}
 	return key, true
