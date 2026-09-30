@@ -239,12 +239,17 @@ func main() {
 		obs.Fatal(log, "cache init failed", "err", err)
 	}
 
+	originTimeout := config.Duration("ORIGIN_TIMEOUT", 5*time.Second)
+	if originTimeout <= 0 {
+		obs.Fatal(log, "ORIGIN_TIMEOUT must be positive", "value", originTimeout.String())
+	}
+
 	srv := &server{
 		cache:         c,
 		models:        models,
 		trace:         recorder,
 		nodeID:        nodeID,
-		originTimeout: config.Duration("ORIGIN_TIMEOUT", 5*time.Second),
+		originTimeout: originTimeout,
 	}
 
 	// An unset ORIGIN_ADDR is a supported mode, not a mistake: it is what you want
