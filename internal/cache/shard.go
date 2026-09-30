@@ -6,10 +6,9 @@ import (
 	"github.com/JustinK33/Belady/internal/trace"
 )
 
-// shard is an independently locked slice of the keyspace. Everything that
-// matters for concurrency happens here: there is no cache-wide lock, and no
-// cache-wide counter, so two requests touching different shards share nothing
-// but the shard slice header.
+// shard is an independently locked slice of the keyspace. There is no cache-wide
+// lock and no cache-wide counter, so two requests touching different shards share
+// nothing but the shard slice header.
 //
 // The lock is a plain Mutex, not an RWMutex. A hit mutates the entry's access
 // history, so readers need exclusive access anyway, and RWMutex costs more than
@@ -165,9 +164,9 @@ func (s *shard) insert(key uint64, value []byte, nowUS, expires int64, onMiss bo
 	s.used += size
 	s.policy.OnAdmit(e)
 	s.admissions++
-	if onMiss {
-		s.record(key, nowUS, uint32(size), false)
-	}
+	// Every admission is traced, Put included: it resets the entry's history, and
+	// the trainer rebuilds that history from the trace.
+	s.record(key, nowUS, uint32(size), false)
 	return true
 }
 

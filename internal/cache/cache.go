@@ -1,9 +1,9 @@
 // Package cache is the cache node's data plane: a sharded store plus the
 // eviction policies that compete inside it.
 //
-// The whole point of the project lives in Policy. Everything else exists to make
-// the policies comparable under identical conditions, and to keep the request
-// path fast enough that the policy's own cost is visible.
+// Policy is the part that varies. The rest keeps the policies comparable under
+// identical conditions, and keeps the request path fast enough that a policy's own
+// cost is visible.
 package cache
 
 import (
@@ -159,7 +159,6 @@ func New(cfg Config) (*Cache, error) {
 		nowUS:      cfg.NowUS,
 		shards:     make([]*shard, n),
 		mask:       uint64(n - 1),
-		policy:     cfg.NewPolicy(per).Name(),
 		defaultTTL: cfg.DefaultTTL,
 	}
 	for i := range c.shards {
@@ -168,6 +167,9 @@ func New(cfg Config) (*Cache, error) {
 			ring = cfg.Trace.Ring(i)
 		}
 		c.shards[i] = newShard(per, cfg.NewPolicy(per), cfg.Nanos, ring)
+		if i == 0 {
+			c.policy = c.shards[0].policy.Name()
+		}
 	}
 	return c, nil
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"testing"
 	"time"
 
@@ -119,5 +120,34 @@ func TestTraceRejectsAShardCountMismatch(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("a cache with 128 shards accepted a 100-ring recorder")
+	}
+}
+
+// A Put resets the entry's history just as an admission after a miss does, so the
+// trainer has to see it as one, or it replays state Go never had.
+func TestTraceRecordsPutAsAnAdmission(t *testing.T) {
+	c, rec, dir := newTraceCache(t, 1)
+
+	c.Put("k", make([]byte, 64), 0)
+	c.Get("k")
+	c.Put("k", make([]byte, 64), 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := rec.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	batches, err := trace.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []bool
+	for _, b := range batches {
+		for _, r := range b.GetRecords() {
+			got = append(got, r.GetHit())
+		}
+	}
+	if want := []bool{false, true, false}; !slices.Equal(got, want) {
+		t.Fatalf("recorded hits %v, want %v", got, want)
 	}
 }

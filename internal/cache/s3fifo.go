@@ -1,10 +1,9 @@
 package cache
 
-// S3-FIFO (Yang, Qiu, Zhao, Cheng, Zhang; SOSP 2023) is the interesting
-// non-learned baseline. It beats LRU on most real workloads using nothing but
-// three FIFO queues and a two-bit counter, which makes it the honest bar the
-// learned policy has to clear: if a model cannot beat two bits of state, the
-// model is not worth its training pipeline.
+// S3-FIFO (Yang, Qiu, Zhao, Cheng, Zhang; SOSP 2023) is the strongest non-learned
+// baseline here. It beats LRU on most real workloads with three FIFO queues and a
+// two-bit counter, so it is the bar the learned policy has to clear to be worth
+// its training pipeline.
 //
 // The idea rests on the observation that most objects in a web cache are
 // one-hit wonders. New objects land in a small probationary queue S. An object
@@ -16,8 +15,13 @@ package cache
 // Queues here hold key hashes rather than intrusive list pointers. That costs a
 // map lookup per queue step, and saves 16 bytes on every cached object plus a
 // whole class of dangling-pointer bug.
+//
+// A removed key's slot stays queued until it is popped, so a key that is removed
+// and re-admitted can appear more than once. inS and inM say which queue a key
+// really belongs to, and a slot whose key is not in its queue's set is skipped.
 type s3fifo struct {
 	inS map[uint64]struct{}
+	inM map[uint64]struct{}
 	inG map[uint64]struct{}
 	// Sliding-window slices: popping advances the header and append reallocates
 	// once capacity runs out, so live memory stays within a small factor of the
@@ -52,6 +56,7 @@ func NewS3FIFO(shardCapacityBytes int64) Policy {
 	}
 	return &s3fifo{
 		inS:         make(map[uint64]struct{}),
+		inM:         make(map[uint64]struct{}),
 		inG:         make(map[uint64]struct{}),
 		smallTarget: target,
 		ghostTarget: ghost,
@@ -69,11 +74,14 @@ func (p *s3fifo) OnAdmit(e *Entry) {
 		// Seen before and requested again: skip probation entirely.
 		delete(p.inG, e.key)
 		p.main = append(p.main, e.key)
+		p.inM[e.key] = struct{}{}
+		p.main = compact(p.main, p.inM)
 		e.freq = 0
 		return
 	}
 	p.small = append(p.small, e.key)
 	p.inS[e.key] = struct{}{}
+	p.small = compact(p.small, p.inS)
 	p.smallBytes += int64(e.size)
 	e.freq = 0
 }
@@ -83,6 +91,28 @@ func (p *s3fifo) OnRemove(e *Entry) {
 		delete(p.inS, e.key)
 		p.smallBytes -= int64(e.size)
 	}
+	delete(p.inM, e.key)
+}
+
+// compact drops stale and duplicate slots once they outnumber the live ones, so
+// Put/Delete churn on a cache that never fills cannot grow a queue without bound.
+func compact(q []uint64, live map[uint64]struct{}) []uint64 {
+	if len(q) <= 2*len(live)+64 {
+		return q
+	}
+	seen := make(map[uint64]struct{}, len(live))
+	out := make([]uint64, 0, len(live))
+	for _, key := range q {
+		if _, ok := live[key]; !ok {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+	}
+	return out
 }
 
 // Victim walks the queues until it finds an object to drop. Promotions and
@@ -124,9 +154,11 @@ func (p *s3fifo) stepSmall(c Candidates) (uint64, bool) {
 	key := p.small[0]
 	p.small = p.small[1:]
 
+	if _, ok := p.inS[key]; !ok {
+		return 0, false
+	}
 	e, live := c.Lookup(key)
 	if !live {
-		// Already deleted by a client; OnRemove cleaned up the accounting.
 		return 0, false
 	}
 	delete(p.inS, key)
@@ -135,6 +167,7 @@ func (p *s3fifo) stepSmall(c Candidates) (uint64, bool) {
 	if e.freq > 0 {
 		// Requested again during probation: promote rather than evict.
 		p.main = append(p.main, key)
+		p.inM[key] = struct{}{}
 		e.freq = 0
 		return 0, false
 	}
@@ -147,6 +180,9 @@ func (p *s3fifo) stepMain(c Candidates) (uint64, bool) {
 	key := p.main[0]
 	p.main = p.main[1:]
 
+	if _, ok := p.inM[key]; !ok {
+		return 0, false
+	}
 	e, live := c.Lookup(key)
 	if !live {
 		return 0, false

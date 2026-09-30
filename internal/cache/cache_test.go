@@ -153,8 +153,8 @@ func TestStatsRatios(t *testing.T) {
 
 // TestEvictionTimingIsAccountedPerVictim covers the pair the break-even arithmetic in
 // docs/03-performance.md rests on: EvictNS over EvictSample is the cost of choosing one
-// victim. Nothing covered it before, because newTestCache pins Nanos to zero, so the
-// whole accumulation could have been dropping samples and every test would still pass.
+// victim. newTestCache pins Nanos to zero, so no other test would notice the
+// accumulation dropping samples.
 //
 // The second half pins why EvictNS/EvictSample is interchangeable with a per-eviction
 // cost, which is what lets that figure be multiplied by evictions-per-request. evictOne

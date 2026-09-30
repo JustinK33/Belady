@@ -30,10 +30,10 @@ func NewModelHolder() *ModelHolder { return &ModelHolder{} }
 
 // Store validates and installs a model.
 //
-// The feature-count check is the whole reason this returns an error. A model trained
-// against a different feature layout loads cleanly and evaluates without complaint;
-// it just reads the wrong column for every split. Rejecting it here, once, is why
-// Model.Raw can skip bounds validation per candidate.
+// It returns an error for the feature-count check. A model trained against a
+// different feature layout loads cleanly and evaluates without complaint while
+// reading the wrong column for every split. Rejecting it here, once, lets Model.Raw
+// skip bounds validation per candidate.
 func (h *ModelHolder) Store(m *model.Model, version string, boundary time.Duration) error {
 	if m.NumFeatures() != features.Count {
 		return fmt.Errorf("model %s expects %d features, this build produces %d (%v)",
@@ -67,12 +67,13 @@ func (h *ModelHolder) Boundary() time.Duration {
 // tree that was trained to answer "is this object's next access beyond the boundary",
 // and evict the one most likely to be.
 //
-// Relaxed Belady is the trick that makes this trainable. Predicting when an object
+// The relaxation is what makes this trainable. Predicting when an object
 // will next be requested is a hard regression problem and mostly wasted effort,
 // because a cache does not need to know whether the next access is in ten minutes or
 // ten hours: both are past the point where keeping the object pays. Collapsing that
 // into one binary question turns it into a classification the model gets right often
 // enough to matter. See docs/02-learned-eviction.md.
+//
 // Everything mutable here is per-shard state reused across the candidates of one
 // eviction, for the same reason sampled keeps its running best in fields: the visitor
 // closure would otherwise be allocated on every eviction.

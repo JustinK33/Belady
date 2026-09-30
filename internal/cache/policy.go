@@ -33,6 +33,7 @@ type Candidates interface {
 // eviction O(sample) with no global priority queue and no lock beyond the shard's
 // own. Redis's LRU approximation works the same way; LRB's contribution is the
 // score function, not the search.
+//
 // Sample takes a callback and is reached through an interface, so the compiler has
 // to assume the callback escapes. A closure built per Victim call would therefore
 // allocate on every eviction, under the shard lock, precisely when the cache is

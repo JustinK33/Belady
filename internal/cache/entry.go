@@ -39,7 +39,7 @@ type Entry struct {
 	freq uint8 // saturating counter, read by s3fifo
 }
 
-// The accessors are the surface a policy sees. Value is deliberately not among
+// The accessors are the surface a policy sees. Value is not among
 // them: no eviction decision should be able to read the cached bytes, and the
 // shard reaches the field directly.
 func (e *Entry) Key() uint64       { return e.key }
@@ -69,9 +69,8 @@ func (e *Entry) touch(nowUS int64) {
 		ms = int64(^uint32(0))
 	}
 
-	// Shift the history one slot older. A ring buffer would avoid the copy, but
-	// 32 bytes is a single cache line and the index arithmetic would then be
-	// paid back on every feature extraction instead.
+	// Shift the history one slot older. A ring buffer would avoid the 32-byte copy,
+	// but then every feature extraction would pay the index arithmetic instead.
 	copy(e.deltas[1:], e.deltas[:HistoryLen-1])
 	e.deltas[0] = uint32(ms)
 
