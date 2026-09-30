@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -16,17 +17,6 @@ func String(key, def string) string {
 		return v
 	}
 	return def
-}
-
-// MustString exits if the key is missing. Use for values with no safe default,
-// such as an upstream address.
-func MustString(key string) string {
-	v, ok := os.LookupEnv(key)
-	if !ok || v == "" {
-		fmt.Fprintf(os.Stderr, "config: required environment variable %s is not set\n", key)
-		os.Exit(2)
-	}
-	return v
 }
 
 func Int(key string, def int) int {
@@ -42,11 +32,9 @@ func Duration(key string, def time.Duration) time.Duration {
 }
 
 // MustDuration exits if the key is set but unparseable, rather than falling back
-// the way Duration does. Use it for a duration that another component has to
-// agree on, where a fallback is worse than a refusal: MODEL_BOUNDARY is the case
-// this exists for, because a node that quietly reverts to the default boundary
-// refuses every model it is offered and serves the fallback policy instead, which
-// looks exactly like a healthy node from outside.
+// the way Duration does. Use it for a duration another component has to agree on,
+// such as MODEL_BOUNDARY: a node that reverted to the default boundary would refuse
+// every model and serve the fallback policy while looking healthy.
 func MustDuration(key string, def time.Duration) time.Duration {
 	raw, ok := os.LookupEnv(key)
 	if !ok || raw == "" {
@@ -82,9 +70,8 @@ func Strings(key string, def []string) []string {
 	return out
 }
 
-// Bytes parses a human-readable size such as "512mb" or "4GiB" into bytes.
-// Cache capacities are the main reason this exists; nobody should have to write
-// 1073741824 in a compose file.
+// Bytes parses a human-readable size such as "512mb" or "4GiB" into bytes, so a
+// compose file can say 1gb rather than 1073741824.
 func Bytes(key string, def int64) int64 {
 	return parse(key, def, parseBytes)
 }
@@ -114,10 +101,13 @@ func parseBytes(s string) (int64, error) {
 		if err != nil {
 			return 0, fmt.Errorf("bad size %q: %w", s, err)
 		}
-		if val < 0 {
-			return 0, fmt.Errorf("bad size %q: negative", s)
+		// !(val >= 0) also catches NaN. float64(MaxInt64) rounds up to 2^63, so >=
+		// is the overflow bound, and converting anything past it is undefined.
+		bytes := val * float64(u.scale)
+		if !(val >= 0) || bytes >= math.MaxInt64 {
+			return 0, fmt.Errorf("bad size %q: out of range", s)
 		}
-		return int64(val * float64(u.scale)), nil
+		return int64(bytes), nil
 	}
 	val, err := strconv.ParseInt(norm, 10, 64)
 	if err != nil {
@@ -131,7 +121,7 @@ func parseBytes(s string) (int64, error) {
 
 // parse falls back to the default and warns rather than exiting: a typo in an
 // optional tuning knob should not take a cache node out of rotation. A value that
-// is not an optional tuning knob wants MustString or MustDuration instead.
+// is not an optional tuning knob wants MustDuration instead.
 func parse[T any](key string, def T, fn func(string) (T, error)) T {
 	raw, ok := os.LookupEnv(key)
 	if !ok || raw == "" {

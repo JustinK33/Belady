@@ -32,7 +32,7 @@ func TestParseBytes(t *testing.T) {
 		}
 	}
 
-	for _, in := range []string{"", "mb", "-1gb", "twelve", "1zb"} {
+	for _, in := range []string{"", "mb", "-1gb", "twelve", "1zb", "infgb", "nanmb", "-infb", "9e18kb", "8589934592gb"} {
 		if got, err := parseBytes(in); err == nil {
 			t.Errorf("parseBytes(%q) = %d, want error", in, got)
 		}
@@ -78,10 +78,9 @@ func TestMustDuration(t *testing.T) {
 	}
 }
 
-// TestMustDurationExitsOnAMalformedValue re-execs this test binary, because the
-// whole point of MustDuration is os.Exit and there is no way to observe that from
-// inside the process. The distinction from Duration's warn-and-fall-back is the
-// only reason MustDuration exists, so it needs a test that actually sees the exit.
+// TestMustDurationExitsOnAMalformedValue re-execs this test binary, because
+// MustDuration differs from Duration only by calling os.Exit, which cannot be
+// observed from inside the process.
 func TestMustDurationExitsOnAMalformedValue(t *testing.T) {
 	if os.Getenv("BELADY_TEST_MUST_DUR_CHILD") == "1" {
 		MustDuration("BELADY_TEST_MUST_DUR", time.Second)
