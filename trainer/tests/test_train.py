@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from belady_trainer import columns, samples, train
-from belady_trainer.__main__ import parse_duration_us, whole_seconds
+from belady_trainer.__main__ import parse_duration_ns, whole_seconds
 
 SECOND = 1_000_000
 BOUNDARY = SECOND
@@ -49,8 +49,8 @@ def test_the_model_learns_the_boundary():
     assert 0.1 < result.positive_rate < 0.9
     assert result.auc > 0.9, f"holdout AUC {result.auc:.3f} on a separable workload"
     assert result.trees > 0
-    # recency is the whole reason snapshots are offset into the interval rather than
-    # taken at the access. If it is not near the top of the gain ranking, the sampling
+    # Snapshots are offset into the interval rather than taken at the access so that
+    # recency carries signal. If it is not near the top of the gain ranking, the sampling
     # has gone wrong and the model is leaning on something it will not see at eviction.
     ranked = sorted(result.importance, key=result.importance.get, reverse=True)
     assert "recency_ms" in ranked[:3], result.importance
@@ -88,25 +88,62 @@ def test_a_boundary_outside_the_workload_is_refused():
         train.fit(flat, boundary_us=hour)
 
 
+# Expected values come from Go's time.ParseDuration.
 @pytest.mark.parametrize(
-    ("text", "want_us"),
+    ("text", "want_ns"),
     [
-        ("600", 600 * SECOND),
-        ("600s", 600 * SECOND),
-        ("10m", 600 * SECOND),
-        ("1h", 3600 * SECOND),
-        ("1h30m", 5400 * SECOND),
-        ("250ms", 250_000),
+        ("0", 0),
+        ("+0", 0),
+        ("-0", 0),
+        ("600s", 600_000_000_000),
+        ("10m", 600_000_000_000),
+        ("1.5m", 90_000_000_000),
+        ("1h30m", 5_400_000_000_000),
+        ("2h45m30.5s", 9_930_500_000_000),
+        (".5s", 500_000_000),
+        ("1.s", 1_000_000_000),
+        ("250ms", 250_000_000),
+        ("1us", 1000),
+        ("1\u00b5s", 1000),
+        ("1\u03bcs", 1000),
+        ("1500ns", 1500),
+        ("+2m", 120_000_000_000),
+        ("-1.5h", -5_400_000_000_000),
+        ("0.000001s", 1000),
+        ("1.0000000000000000001s", 1_000_000_000),
+        ("3.33333333333333333333m", 200_000_000_000),
+        ("9223372036854775807ns", 9_223_372_036_854_775_807),
     ],
 )
-def test_go_style_durations(text, want_us):
-    assert parse_duration_us(text) == want_us
+def test_durations_parse_as_go_parses_them(text, want_ns):
+    assert parse_duration_ns(text) == want_ns
 
 
-@pytest.mark.parametrize("text", ["", "  ", "10x", "m10", "1h30", "-5s", "0s"])
-def test_bad_durations_are_refused(text):
+@pytest.mark.parametrize(
+    "text",
+    [
+        "600",
+        "",
+        " ",
+        "1",
+        "s",
+        ".s",
+        "1x",
+        "1.5",
+        "1 m",
+        "--1s",
+        "1e3s",
+        "10m ",
+        "m10",
+        "1h30",
+        "9223372036854775808ns",
+        "2562048h",
+        "1.2.3s",
+    ],
+)
+def test_durations_go_refuses_are_refused(text):
     with pytest.raises(ValueError):
-        parse_duration_us(text)
+        parse_duration_ns(text)
 
 
 @pytest.mark.parametrize(
@@ -127,3 +164,26 @@ def test_a_boundary_the_metadata_cannot_carry_is_refused(boundary_us):
     """
     with pytest.raises(ValueError, match="whole number of seconds"):
         whole_seconds(boundary_us)
+
+
+def test_a_holdout_with_one_class_is_refused():
+    # The newest fifth of rows is all positive, so the holdout has no negatives and
+    # its AUC would be undefined.
+    data = synthetic()
+    order = np.argsort(data.timestamp_us, kind="stable")
+    y = np.zeros_like(data.y)
+    y[order[int(len(y) * 0.8) :]] = 1
+    drifted = samples.Samples(x=data.x, y=y, timestamp_us=data.timestamp_us, dropped_censored=0)
+    with pytest.raises(train.DegenerateLabels, match="single class"):
+        train.fit(drifted, boundary_us=BOUNDARY)
+
+
+def test_no_rows_is_refused():
+    empty = samples.Samples(
+        x=np.zeros((0, columns.COUNT), dtype=np.float32),
+        y=np.zeros(0, dtype=np.uint8),
+        timestamp_us=np.zeros(0, dtype=np.int64),
+        dropped_censored=5,
+    )
+    with pytest.raises(train.DegenerateLabels, match="no rows"):
+        train.fit(empty, boundary_us=BOUNDARY)

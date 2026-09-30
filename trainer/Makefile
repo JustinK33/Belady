@@ -67,5 +67,6 @@ train-only: $(PY) ## Fit a model without publishing
 		--traces $(TRACE_DIR) --out $(MODEL_OUT) --publish ''
 
 .PHONY: clean
-clean:
-	rm -rf $(MODEL_OUT) .pytest_cache .ruff_cache **/__pycache__
+clean: ## Remove the model, caches and bytecode
+	rm -rf $(MODEL_OUT) .pytest_cache .ruff_cache
+	find . -path ./.venv -prune -o -name __pycache__ -prune -exec rm -rf {} +

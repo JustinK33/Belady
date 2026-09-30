@@ -5,20 +5,20 @@ fall beyond the Belady boundary?
 At eviction the cache samples a handful of candidates, scores them, and evicts the
 highest score, so only the *ranking* of a few objects matters and the absolute
 probability never does.
-That is why a shallow GBDT is enough, and why AUC is the metric worth reading.
+So a shallow GBDT is enough, and AUC is the metric to read.
 
 The LightGBM parameters here are not stylistic.
 `internal/model` is a hand-written parser for LightGBM's text dump that supports
 exactly one node shape: a numeric threshold with a two-way branch.
-Anything else - categorical splits, a missing-value branch, linear leaves, multiclass
-- makes the model unloadable, so the parameters that would produce them are pinned
-off here rather than discovered at rollout time.
+Categorical splits, missing-value branches, linear leaves and multiclass output all
+make the model unloadable, so the parameters that would produce them are pinned off
+here rather than discovered at rollout time.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import lightgbm as lgb
 import numpy as np
@@ -72,7 +72,7 @@ class Result:
     auc: float
     trees: int
     dropped_censored: int
-    importance: dict[str, int] = field(default_factory=dict)
+    importance: dict[str, int]
 
     def summary(self) -> str:
         top = sorted(self.importance.items(), key=lambda kv: -kv[1])[:5]
@@ -92,6 +92,8 @@ class Result:
 
 def fit(data: samples.Samples, *, boundary_us: int, seed: int = 1) -> Result:
     """Train on the older rows and score on the newer ones."""
+    if len(data) == 0:
+        raise DegenerateLabels("no rows to train on: every snapshot was censored")
     rate = data.positive_rate
     if rate < MIN_CLASS_RATE or rate > 1 - MIN_CLASS_RATE:
         raise DegenerateLabels(
@@ -103,6 +105,13 @@ def fit(data: samples.Samples, *, boundary_us: int, seed: int = 1) -> Result:
     order = np.argsort(data.timestamp_us, kind="stable")
     split = int(len(order) * (1 - HOLDOUT_FRACTION))
     train_idx, valid_idx = order[:split], order[split:]
+    # AUC is undefined on a single class, so a holdout without both would report a
+    # meaningless score. That happens when the labels drift over the trace.
+    if len(np.unique(data.y[valid_idx])) < 2 or len(np.unique(data.y[train_idx])) < 2:
+        raise DegenerateLabels(
+            "the time-ordered train/holdout split left one side with a single class, "
+            "so the labels change over the trace; record a longer or steadier trace"
+        )
 
     train = lgb.Dataset(
         data.x[train_idx],

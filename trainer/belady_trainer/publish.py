@@ -2,11 +2,9 @@
 
 The registry re-validates everything sent here: it recomputes the digest, checks the
 declared size against the bytes it received, and refuses a version that is not a bare
-filename.
-None of that is a reason to skip validating on this side.
-A model rejected after 40 MiB have crossed the wire is a worse failure than one
-rejected before the stream opens, and the digest is the only thing that distinguishes
-a truncated upload from a short model.
+filename or that already exists.
+The checks here reject a bad model before the stream opens rather than after it has
+crossed the wire.
 """
 
 from __future__ import annotations
@@ -27,12 +25,16 @@ CHUNK_BYTES = 256 * 1024
 
 
 def version_for(when: float | None = None) -> str:
-    """A sortable version string the registry will accept.
+    """A sortable version string the registry will accept, e.g. 20260930T181106123Z.
 
-    No dots and no separators: the registry stores models as files named after the
-    version and rejects anything that could escape its directory.
+    Millisecond resolution, because the registry refuses a version it already has and
+    two publishes can land in the same second. No dots and no separators: the registry
+    stores models as files named after the version.
     """
-    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(when))
+    if when is None:
+        when = time.time()
+    ms = int(when * 1000) % 1000
+    return time.strftime("%Y%m%dT%H%M%S", time.gmtime(when)) + f"{ms:03d}Z"
 
 
 def _requests(
@@ -73,4 +75,11 @@ def publish(
     # use. Swap in grpc.ssl_channel_credentials when mTLS lands; see docs/06-security.md.
     with grpc.insecure_channel(address) as channel:
         client = registry_pb2_grpc.RegistryStub(channel)
-        return client.PublishModel(_requests(meta, body), timeout=timeout).meta
+        try:
+            return client.PublishModel(_requests(meta, body), timeout=timeout).meta
+        except grpc.RpcError as err:
+            raise PublishError(f"{address}: {err.code().name}: {err.details()}") from err
+
+
+class PublishError(Exception):
+    """The registry refused the model or could not be reached."""

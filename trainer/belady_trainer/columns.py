@@ -25,10 +25,10 @@ NAMES = [
 COUNT = len(NAMES)
 
 # Indices, for the code that fills the matrix.
-SIZE_BYTES = 0
-RECENCY_MS = 1
-AGE_MS = 2
-ACCESSES = 3
-FREQUENCY = 4
-REUSE_RATE = 5
-DELTA0 = 6
+SIZE_BYTES = NAMES.index("size_bytes")
+RECENCY_MS = NAMES.index("recency_ms")
+AGE_MS = NAMES.index("age_ms")
+ACCESSES = NAMES.index("accesses")
+FREQUENCY = NAMES.index("frequency")
+REUSE_RATE = NAMES.index("reuse_rate")
+DELTA0 = NAMES.index("delta_0")

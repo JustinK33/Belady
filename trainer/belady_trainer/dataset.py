@@ -5,18 +5,19 @@ protobuf varint byte count followed by that many bytes.
 Protobuf is not self-delimiting, so a file of concatenated messages cannot be split
 back apart without the prefix.
 The Go writer is internal/trace/recorder.go and the Go reader is
-internal/trace/reader.go; this is the third implementation of the same twelve lines
-and deliberately so, because the alternative is the trainer depending on a Go
-binary.
+internal/trace/reader.go; this reimplements the reader so the trainer does not
+depend on a Go binary.
 """
 
 from __future__ import annotations
 
 import glob
 import os
+import sys
 from dataclasses import dataclass
 
 import numpy as np
+from google.protobuf.message import DecodeError
 
 from belady.v1 import trace_pb2
 
@@ -84,21 +85,24 @@ def read_batches(path: str):
         try:
             size, pos = _read_varint(data, pos)
         except ValueError:
-            print(f"warning: {name}: corrupt length prefix, dropping the tail")
+            print(f"warning: {name}: corrupt length prefix, dropping the tail", file=sys.stderr)
             return
         if pos + size > len(data):
-            print(f"warning: {name}: frame claims {size} bytes, dropping the tail")
+            print(f"warning: {name}: frame claims {size} bytes, dropping the tail", file=sys.stderr)
             return
         batch = trace_pb2.AccessBatch()
-        batch.ParseFromString(bytes(data[pos : pos + size]))
+        try:
+            batch.ParseFromString(bytes(data[pos : pos + size]))
+        except DecodeError as err:
+            raise ValueError(f"{name}: corrupt batch at byte {pos}: {err}") from err
         pos += size
         yield batch
 
 
 def segments(directory: str) -> list[str]:
-    """List finished segments, oldest first.
+    """List finished segments in name order.
 
-    Names carry a nanosecond timestamp, so lexical order is chronological order.
+    Names are <node>-<unix nanos>, so each node's segments come out oldest first.
     Unfinished segments carry a different suffix and are skipped, which is what makes
     it safe to train from a directory the cache is still writing to.
     """

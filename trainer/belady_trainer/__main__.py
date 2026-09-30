@@ -1,14 +1,14 @@
 """Command line entry point: `python -m belady_trainer ...`.
 
-Configuration is environment-first to match the Go services, and MODEL_BOUNDARY in
-particular is read from the same variable the cache nodes read, because a node refuses
-a model whose boundary disagrees with its own. Sharing the variable is what makes that
-check a safety net rather than a routine failure.
+Configuration is environment-first to match the Go services. MODEL_BOUNDARY is read
+from the same variable the cache nodes read, because a node refuses a model whose
+boundary disagrees with its own.
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import sys
@@ -24,37 +24,79 @@ DEFAULT_BOUNDARY = "10m"
 # only skew the recency distribution away from what a resident entry looks like.
 MAX_RECENCY_BOUNDARIES = 4
 
-_DURATION = re.compile(r"(\d+)(ns|us|ms|s|m|h)")
-_UNIT_US = {"ns": 1e-3, "us": 1, "ms": 1e3, "s": 1e6, "m": 60e6, "h": 3600e6}
+_UNIT_NS = {
+    "ns": 1,
+    "us": 1_000,
+    "\u00b5s": 1_000,  # micro sign
+    "\u03bcs": 1_000,  # Greek mu
+    "ms": 1_000_000,
+    "s": 1_000_000_000,
+    "m": 60_000_000_000,
+    "h": 3_600_000_000_000,
+}
+_COMPONENT = re.compile(r"(\d*)(?:\.(\d*))?([^\d.]*)")
+_MAX_NS = 1 << 63
 
 
-def parse_duration_us(text: str) -> int:
-    """Parse a Go-style duration, e.g. "10m", "1h30m", "600s".
+def parse_duration_ns(text: str) -> int:
+    """Parse a duration exactly as Go's time.ParseDuration does, e.g. "1.5m", "1h30m".
 
-    Go's time.ParseDuration is what the cache nodes use, so the same string has to
-    work here. A bare number is read as seconds, which is the one thing Go rejects and
-    the one thing people type.
+    The cache nodes parse MODEL_BOUNDARY with Go, so a string has to mean the same
+    thing here or be refused here too. That includes refusing a bare number such as
+    "600", which Go rejects.
     """
-    text = text.strip()
-    if not text:
-        raise ValueError("empty duration")
-    if text.isdigit():
-        return int(text) * 1_000_000
+    s = text
+    neg = s[:1] == "-"
+    if s[:1] in ("-", "+"):
+        s = s[1:]
+    if s == "0":
+        return 0
+    if not s:
+        raise ValueError(f"invalid duration {text!r}")
 
-    total = 0.0
-    consumed = 0
-    for match in _DURATION.finditer(text):
-        if match.start() != consumed:
-            break
-        total += int(match.group(1)) * _UNIT_US[match.group(2)]
-        consumed = match.end()
-    if consumed != len(text) or total <= 0:
-        raise ValueError(f"cannot parse duration {text!r}: want e.g. 30s, 10m, 1h30m")
-    return int(total)
+    total = 0
+    pos = 0
+    while pos < len(s):
+        m = _COMPONENT.match(s, pos)
+        whole, frac, unit = m.group(1), m.group(2), m.group(3)
+        if not whole and not frac:
+            raise ValueError(f"invalid duration {text!r}")
+        if unit not in _UNIT_NS:
+            raise ValueError(f"unknown unit {unit!r} in duration {text!r}")
+        scale = _UNIT_NS[unit]
+
+        v = int(whole or 0)
+        if v > _MAX_NS // scale:
+            raise ValueError(f"invalid duration {text!r}")
+        v *= scale
+        if frac:
+            # Go keeps fraction digits only while they fit in an int64, then applies
+            # them in float64, so this does the same to round identically.
+            f, fscale = 0, 1.0
+            for digit in frac:
+                if f > (_MAX_NS - 1) // 10 or f * 10 + int(digit) >= _MAX_NS:
+                    break
+                f = f * 10 + int(digit)
+                fscale *= 10
+            v += int(float(f) * (scale / fscale))
+        total += v
+        if total > _MAX_NS:
+            raise ValueError(f"invalid duration {text!r}")
+        pos = m.end()
+
+    if neg:
+        return -total
+    if total == _MAX_NS:
+        raise ValueError(f"invalid duration {text!r}")
+    return total
 
 
 def _load(directory: str):
-    trace = dataset.load(directory)
+    try:
+        trace = dataset.load(directory)
+    except (OSError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        raise SystemExit(1) from err
     print(
         f"loaded {len(trace)} records over {trace.duration_us / 1e6:.1f}s "
         f"from {len(dataset.segments(directory))} segments",
@@ -66,8 +108,10 @@ def _load(directory: str):
 def cmd_boundary(args: argparse.Namespace) -> int:
     trace = _load(args.traces)
     print("reuse time quantiles (seconds):")
-    for q in (0.5, 0.75, 0.9, 0.99):
-        us = samples.suggest_boundary_us(trace.key, trace.timestamp_us, quantile=q)
+    qs = [0.5, 0.75, 0.9, 0.99]
+    for q, us in zip(
+        qs, samples.reuse_quantiles_us(trace.key, trace.timestamp_us, qs), strict=True
+    ):
         print(f"  p{int(q * 100):<3} {us / 1e6:12.4f}")
     return 0
 
@@ -76,13 +120,11 @@ def whole_seconds(boundary_us: int) -> int:
     """Convert a boundary to the whole seconds ModelMeta carries, or refuse.
 
     ModelMeta.boundary_seconds is a uint32 of seconds, and a cache node compares it
-    against its own MODEL_BOUNDARY exactly. Anything this cannot represent has to be
-    refused rather than rounded: 500ms floors to 0 and dies in publish, and 1500ms
-    truncates to 1, which publishes a model fit at one boundary under the label of
-    another. A node set to 1500ms then refuses it and a node set to 1s accepts it,
-    which is the one outcome sharing the variable is supposed to rule out.
+    against its own MODEL_BOUNDARY exactly. Rounding would publish a model fit at one
+    boundary under the label of another: 1500ms truncates to 1, so a node set to 1s
+    would accept labels that mean something else.
     """
-    if boundary_us % 1_000_000 != 0 or boundary_us < 1_000_000:
+    if boundary_us % 1_000_000 != 0 or not 1_000_000 <= boundary_us <= 0xFFFFFFFF * 1_000_000:
         raise ValueError(
             f"{boundary_us / 1e6:g}s is not a boundary the registry metadata can "
             f"carry. ModelMeta.boundary_seconds is whole seconds, so the boundary "
@@ -93,11 +135,9 @@ def whole_seconds(boundary_us: int) -> int:
 
 
 def cmd_train(args: argparse.Namespace) -> int:
-    # Before _load, so an unusable boundary costs nothing rather than surfacing after
-    # a full fit has been written to disk. A message rather than a traceback, because
-    # MODEL_BOUNDARY is a value an operator types and this is the only feedback on it.
+    # Checked before _load, so a bad boundary fails before the fit rather than after.
     try:
-        boundary_us = parse_duration_us(args.boundary)
+        boundary_us = parse_duration_ns(args.boundary) // 1000
         boundary_seconds = whole_seconds(boundary_us)
     except ValueError as err:
         print(f"error: MODEL_BOUNDARY={args.boundary!r}: {err}", file=sys.stderr)
@@ -122,14 +162,18 @@ def cmd_train(args: argparse.Namespace) -> int:
         # p90 rather than the median: the label is "reused beyond the boundary", so a
         # boundary at the median leaves half the rows positive on a slow workload and,
         # on a fast one, rounds to the 1s floor anyway. The usable band is p90 to p99.
-        p90 = samples.suggest_boundary_us(trace.key, trace.timestamp_us, quantile=0.9)
+        p90, p99 = samples.reuse_quantiles_us(trace.key, trace.timestamp_us, [0.9, 0.99])
+        lo, hi = max(1, math.ceil(p90 / 1e6)), math.floor(p99 / 1e6)
         print(f"error: {err}", file=sys.stderr)
+        if lo <= hi:
+            hint = f"try MODEL_BOUNDARY between {lo}s and {hi}s, the p90 to p99 reuse times."
+        else:
+            hint = (
+                f"p99 reuse time is {p99 / 1e6:g}s, below the 1s minimum boundary. "
+                f"Capture a longer or slower trace."
+            )
         print(
-            f"hint: the p90 reuse time in this trace is {p90 / 1e6:g}s, so try "
-            f"MODEL_BOUNDARY between there and p99. Run `boundary` for the full "
-            f"distribution: a boundary above p99 labels nothing 'beyond', one below "
-            f"p50 labels everything. Whole seconds only, and at least 1s, because "
-            f"that is what the registry metadata carries.",
+            f"hint: {hint} Run `boundary` for the full distribution.",
             file=sys.stderr,
         )
         return 2
@@ -144,19 +188,23 @@ def cmd_train(args: argparse.Namespace) -> int:
     if not args.publish:
         return 0
 
-    meta = publish_mod.publish(
-        args.publish,
-        body,
-        version=publish_mod.version_for(),
-        boundary_seconds=boundary_seconds,
-        feature_count=columns.COUNT,
-        metrics={
-            "auc": f"{result.auc:.4f}",
-            "rows": str(result.rows),
-            "positive_rate": f"{result.positive_rate:.4f}",
-            "trees": str(result.trees),
-        },
-    )
+    try:
+        meta = publish_mod.publish(
+            args.publish,
+            body,
+            version=publish_mod.version_for(),
+            boundary_seconds=boundary_seconds,
+            feature_count=columns.COUNT,
+            metrics={
+                "auc": f"{result.auc:.4f}",
+                "rows": str(result.rows),
+                "positive_rate": f"{result.positive_rate:.4f}",
+                "trees": str(result.trees),
+            },
+        )
+    except publish_mod.PublishError as err:
+        print(f"error: publish failed: {err}", file=sys.stderr)
+        return 1
     print(f"published {meta.version} to {args.publish}", file=sys.stderr)
     return 0
 

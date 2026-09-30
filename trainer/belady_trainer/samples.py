@@ -1,9 +1,7 @@
 """Turning an access trace into a labelled training set.
 
-Two things happen here, and both are where a learned cache policy is usually got
-wrong.
+Two things happen here: reconstructing entry state, and choosing when to label.
 
-**Reconstructing entry state.**
 The features the cache scores a candidate on are derived from state the cache
 maintains per entry: when it was admitted, how many times it has been accessed, the
 gaps between recent accesses.
@@ -13,7 +11,6 @@ Admissions are the reset points: a record with `hit=false` is a miss, which mean
 object was not resident, so its counters start over.
 That is why the trace needs no eviction records.
 
-**Choosing the moment to label.**
 The obvious thing is to label each access, but the features would then always have
 `recency_ms = 0`, because no time has passed.
 At eviction the recency is whatever it happens to be, and it is the single most
@@ -37,12 +34,10 @@ import numpy as np
 
 from . import columns
 
-# UINT32_MAX matches the cap in entry.touch: the Go history stores gaps as uint32
-# milliseconds, which saturates at 49 days.
-UINT32_MAX = np.uint64(0xFFFFFFFF)
+# The cap in entry.touch: the Go history stores gaps as uint32 milliseconds.
+UINT32_MAX = 0xFFFFFFFF
 
-# FREQ_MAX is the ceiling of the 2-bit saturating counter S3-FIFO uses and the
-# feature vector exposes.
+# The ceiling of S3-FIFO's 2-bit saturating counter, which the features expose.
 FREQ_MAX = 3
 
 
@@ -59,14 +54,6 @@ class Samples:
     @property
     def positive_rate(self) -> float:
         return float(self.y.mean()) if len(self.y) else 0.0
-
-
-def _group_by_key(key: np.ndarray, timestamp_us: np.ndarray) -> np.ndarray:
-    """Return an ordering that groups records by key, chronological within each key.
-
-    lexsort's last key is the primary one, so this sorts by key then by time.
-    """
-    return np.lexsort((timestamp_us, key))
 
 
 def build(
@@ -89,7 +76,8 @@ def build(
     if n == 0:
         raise ValueError("the trace is empty")
 
-    order = _group_by_key(key, timestamp_us)
+    # Grouped by key, chronological within each key: lexsort's last key is primary.
+    order = np.lexsort((timestamp_us, key))
     k = key[order]
     t = timestamp_us[order].astype(np.int64)
     size = size_bytes[order]
@@ -118,8 +106,7 @@ def build(
     # entry.touch. It is zero at a segment start, where the history is reset.
     gap_us = np.zeros(n, dtype=np.int64)
     np.subtract(t[1:], t[:-1], out=gap_us[1:])
-    np.maximum(gap_us, 0, out=gap_us)
-    gap_ms = np.minimum(gap_us // 1000, UINT32_MAX.astype(np.int64))
+    gap_ms = np.minimum(gap_us // 1000, UINT32_MAX)
     gap_ms[new_segment] = 0
 
     # time to the next access of the same key, or -1 when there is none in the trace
@@ -132,13 +119,13 @@ def build(
     # Snapshot offset into the interval. Bounded by max_recency_us so a key that
     # vanishes for a day does not contribute a row claiming a day of idleness, which
     # no resident entry would ever have.
-    # The range starts at zero, not one, because a key can be accessed twice inside the
-    # same microsecond under concurrency. That is a zero-length interval, and the only
-    # offset into it is zero.
+    # The offset excludes the next access itself, where the entry is already touched.
+    # A key accessed twice inside the same microsecond has a zero-length interval,
+    # and the only offset into it is zero.
     rng = np.random.default_rng(seed)
     censored = next_gap_us < 0
     span = np.where(censored, max_recency_us, np.minimum(next_gap_us, max_recency_us))
-    delta_us = rng.integers(0, span + 1, dtype=np.int64)
+    delta_us = rng.integers(0, np.maximum(span, 1), dtype=np.int64)
 
     snapshot_us = t + delta_us
     remaining_us = next_gap_us - delta_us
@@ -152,7 +139,6 @@ def build(
 
     x = np.zeros((int(keep.sum()), columns.COUNT), dtype=np.float32)
     age_us = snapshot_us[keep] - admitted[keep]
-    np.maximum(age_us, 0, out=age_us)
 
     x[:, columns.SIZE_BYTES] = size[keep]
     x[:, columns.RECENCY_MS] = delta_us[keep] // 1000
@@ -168,11 +154,8 @@ def build(
         # delta_j is the gap folded in j accesses ago, so it reads j rows back. The
         # position guard is what stops it reading across an admission, or off the front
         # of a trace shorter than the history.
-        if j == 0:
-            source = gap_ms
-        else:
-            source = np.zeros(n, dtype=np.int64)
-            source[j:] = gap_ms[: max(n - j, 0)]
+        source = np.zeros(n, dtype=np.int64)
+        source[j:] = gap_ms[: max(n - j, 0)]
         x[:, columns.DELTA0 + j] = np.where(position >= j, source, 0)[kept]
 
     return Samples(
@@ -183,27 +166,23 @@ def build(
     )
 
 
-def suggest_boundary_us(
+def reuse_quantiles_us(
     key: np.ndarray,
     timestamp_us: np.ndarray,
-    quantile: float = 0.5,
-) -> int:
-    """Report the boundary that would split the observed reuse times evenly.
+    quantiles: list[float],
+) -> list[int]:
+    """Return the given quantiles of the gaps between accesses to the same key.
 
     The boundary is a workload property, not a tuning knob: it has to sit inside the
     range of reuse times the cache actually sees.
-    Set it far above them and every object is "beyond boundary", set it far below and
-    none are, and in both cases the model learns nothing while still scoring
-    confidently.
-    This is what `train` reports when the class balance comes out degenerate.
+    Far above them every object is "beyond boundary", far below none are, and either
+    way the model learns nothing while still scoring confidently.
+    Returns zeros when the trace holds no reuse at all.
     """
-    order = _group_by_key(key, timestamp_us)
+    order = np.lexsort((timestamp_us, key))
     k = key[order]
     t = timestamp_us[order].astype(np.int64)
-    if len(t) < 2:
-        return 0
-    same = k[:-1] == k[1:]
-    gaps = (t[1:] - t[:-1])[same]
+    gaps = (t[1:] - t[:-1])[k[:-1] == k[1:]]
     if len(gaps) == 0:
-        return 0
-    return int(np.quantile(gaps, quantile))
+        return [0] * len(quantiles)
+    return [int(v) for v in np.quantile(gaps, quantiles)]

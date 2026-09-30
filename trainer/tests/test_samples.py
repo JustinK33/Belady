@@ -194,9 +194,9 @@ def test_two_accesses_in_the_same_microsecond():
     assert got.y[zero][0] == 0, "an object accessed again immediately is not beyond the boundary"
 
 
-def test_suggest_boundary_reports_the_median_gap():
+def test_reuse_quantiles_report_the_gaps():
     key, ts, _, _ = trace(
         [(7, 0, 1, False), (7, SECOND, 1, True), (7, 3 * SECOND, 1, True), (7, 6 * SECOND, 1, True)]
     )
     # gaps are 1s, 2s, 3s
-    assert samples.suggest_boundary_us(key, ts) == 2 * SECOND
+    assert samples.reuse_quantiles_us(key, ts, [0.5, 1.0]) == [2 * SECOND, 3 * SECOND]
