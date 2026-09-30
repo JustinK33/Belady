@@ -5,11 +5,6 @@
 // exact same request sequence can be scored by Belady's MIN afterwards. A
 // generated-on-the-fly workload would be cheaper and would make the comparison
 // meaningless.
-//
-// The package is split by responsibility: workload.go draws the trace, replay.go
-// issues it and collects latencies, stats.go turns two server snapshots into the
-// window's counters, and report.go renders either form of output. This file is the
-// sequencing and the perf gate, and nothing else.
 package main
 
 import (
@@ -25,6 +20,9 @@ import (
 	"github.com/JustinK33/Belady/internal/grpcx"
 )
 
+// version is set at release time with -ldflags "-X main.version=...".
+var version = "dev"
+
 type options struct {
 	target      string
 	requests    int
@@ -32,6 +30,7 @@ type options struct {
 	concurrency int
 	warmup      int
 	zipfS       float64
+	rpcTimeout  time.Duration
 
 	// Optional thresholds. Zero means no gate, which is what you want locally; CI
 	// sets them so a policy or hot-path regression fails the build instead of
@@ -48,13 +47,22 @@ func main() {
 		concurrency: config.Int("CONCURRENCY", 64),
 		warmup:      config.Int("WARMUP", 20_000),
 		zipfS:       config.Float("ZIPF_S", 1.1),
+		rpcTimeout:  config.Duration("RPC_TIMEOUT", 5*time.Second),
 
 		minObjectHit: config.Float("MIN_OBJECT_HIT", 0),
 		maxP99:       config.Duration("MAX_P99", 0),
 	}
-	if opts.zipfS <= 1 {
-		fmt.Fprintln(os.Stderr, "ZIPF_S must be greater than 1")
-		os.Exit(2)
+	switch {
+	case opts.zipfS <= 1:
+		die(2, "ZIPF_S must be greater than 1")
+	case opts.requests < 0:
+		die(2, "REQUESTS must not be negative")
+	case opts.keyspace < 1:
+		die(2, "KEYSPACE must be at least 1")
+	case opts.concurrency < 1:
+		die(2, "CONCURRENCY must be at least 1")
+	case opts.rpcTimeout <= 0:
+		die(2, "RPC_TIMEOUT must be positive")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -62,12 +70,12 @@ func main() {
 
 	conn, err := grpcx.Dial(opts.target)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "dial %s: %v\n", opts.target, err)
-		os.Exit(1)
+		die(1, "dial %s: %v", opts.target, err)
 	}
 	defer func() { _ = conn.Close() }()
 	client := beladyv1.NewCacheClient(conn)
 
+	fmt.Fprintf(os.Stderr, "loadgen %s\n", version)
 	trace := generateTrace(opts)
 
 	// Warmup requests are excluded from the reported numbers. Measuring a cold
@@ -76,34 +84,33 @@ func main() {
 		// Progress goes to stderr, because with REPORT_JSON on stdout is one object
 		// and a sweep pipes it straight into jq.
 		fmt.Fprintf(os.Stderr, "warming up with %d requests\n", opts.warmup)
-		if _, err := replay(ctx, client, trace[:min(opts.warmup, len(trace))], opts.concurrency); err != nil {
-			fmt.Fprintf(os.Stderr, "warmup: %v\n", err)
-			os.Exit(1)
+		if _, err := replay(ctx, client, trace[:min(opts.warmup, len(trace))], opts.concurrency, opts.rpcTimeout); err != nil {
+			die(1, "warmup: %v", err)
 		}
 	}
 
 	before, err := client.Stats(ctx, &beladyv1.StatsRequest{})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "stats: %v\n", err)
-		os.Exit(1)
+		die(1, "stats: %v", err)
 	}
 
 	fmt.Fprintf(os.Stderr, "replaying %d requests at concurrency %d\n", len(trace), opts.concurrency)
 	start := time.Now()
-	res, err := replay(ctx, client, trace, opts.concurrency)
+	res, err := replay(ctx, client, trace, opts.concurrency, opts.rpcTimeout)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "replay: %v\n", err)
-		os.Exit(1)
+		die(1, "replay: %v", err)
 	}
 	elapsed := time.Since(start)
 
 	after, err := client.Stats(ctx, &beladyv1.StatsRequest{})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "stats: %v\n", err)
-		os.Exit(1)
+		die(1, "stats: %v", err)
 	}
 
-	sd := delta(before, after)
+	sd, err := delta(before, after)
+	if err != nil {
+		die(1, "%v", err)
+	}
 	d := derive(opts, trace, res, sd)
 	if config.Bool("REPORT_JSON", false) {
 		reportJSON(opts, res, sd, d, elapsed)
@@ -134,4 +141,9 @@ func withinThresholds(opts options, res *results, sd serverDelta) bool {
 		}
 	}
 	return ok
+}
+
+func die(code int, format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(code)
 }

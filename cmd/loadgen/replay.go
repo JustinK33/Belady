@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sort"
-	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	beladyv1 "github.com/JustinK33/Belady/gen/belady/v1"
 )
@@ -28,31 +30,24 @@ type results struct {
 	hitNS, missNS int64
 }
 
-func replay(ctx context.Context, client beladyv1.CacheClient, trace []string, concurrency int) (*results, error) {
-	type slot struct {
-		err     error
-		samples []sample
-	}
-	slots := make([]slot, concurrency)
-
-	var wg sync.WaitGroup
+// replay issues trace at the given concurrency, each Get bounded by timeout. The
+// first failure cancels the other workers.
+func replay(ctx context.Context, client beladyv1.CacheClient, trace []string, concurrency int, timeout time.Duration) (*results, error) {
+	samples := make([][]sample, concurrency)
+	g, ctx := errgroup.WithContext(ctx)
 	for w := range concurrency {
-		wg.Add(1)
-		go func(w int) {
-			defer wg.Done()
+		g.Go(func() error {
 			// Each worker takes a strided slice of the trace. Striding rather than
 			// splitting into blocks keeps every worker's key popularity distribution
 			// the same as the whole trace's.
 			out := make([]sample, 0, len(trace)/concurrency+1)
 			for i := w; i < len(trace); i += concurrency {
-				if ctx.Err() != nil {
-					break
-				}
 				t0 := time.Now()
-				resp, err := client.Get(ctx, &beladyv1.GetRequest{Key: trace[i]})
+				rctx, cancel := context.WithTimeout(ctx, timeout)
+				resp, err := client.Get(rctx, &beladyv1.GetRequest{Key: trace[i]})
+				cancel()
 				if err != nil {
-					slots[w].err = err
-					break
+					return fmt.Errorf("get %s: %w", trace[i], err)
 				}
 				out = append(out, sample{
 					latency:   time.Since(t0),
@@ -60,17 +55,17 @@ func replay(ctx context.Context, client beladyv1.CacheClient, trace []string, co
 					fromCache: resp.GetSource() == beladyv1.Source_SOURCE_CACHE,
 				})
 			}
-			slots[w].samples = out
-		}(w)
+			samples[w] = out
+			return nil
+		})
 	}
-	wg.Wait()
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
 
 	res := &results{latencies: make([]time.Duration, 0, len(trace))}
-	for _, s := range slots {
-		if s.err != nil {
-			return nil, s.err
-		}
-		for _, sm := range s.samples {
+	for _, worker := range samples {
+		for _, sm := range worker {
 			res.latencies = append(res.latencies, sm.latency)
 			res.served++
 			res.bytes += int64(sm.bytes)
@@ -86,10 +81,14 @@ func replay(ctx context.Context, client beladyv1.CacheClient, trace []string, co
 	return res, nil
 }
 
-// meanMiss minus meanHit is the marginal cost of a miss, which is the quantity the
-// break-even arithmetic in docs/03-performance.md is expressed in. Reporting it
-// beside the percentiles is what turns "is a learned policy worth it here" into a
-// comparison against a number rather than against the origin's configured latency.
+func (r *results) mean() time.Duration     { return meanOf(r.hitNS+r.missNS, r.served) }
+func (r *results) meanHit() time.Duration  { return meanOf(r.hitNS, r.fromCache) }
+func (r *results) meanMiss() time.Duration { return meanOf(r.missNS, r.served-r.fromCache) }
+
+// marginalMiss is the measured cost of a miss over a hit, the quantity the
+// break-even arithmetic in docs/03-performance.md is expressed in. It is reported
+// so a learned policy is judged against a measured number rather than the
+// origin's configured latency.
 //
 // ponytail: mean-field, not causal. At concurrency 64 a slow miss also delays the
 // hits queued behind it, so part of the miss cost is charged to the hits and the
@@ -97,9 +96,7 @@ func replay(ctx context.Context, client beladyv1.CacheClient, trace []string, co
 // generator at a fixed arrival rate, which removes the coupling; until then the
 // check that it is credible is that the difference tracks ORIGIN_LATENCY with a
 // slope near 1.
-func (r *results) mean() time.Duration     { return meanOf(r.hitNS+r.missNS, r.served) }
-func (r *results) meanHit() time.Duration  { return meanOf(r.hitNS, r.fromCache) }
-func (r *results) meanMiss() time.Duration { return meanOf(r.missNS, r.served-r.fromCache) }
+func (r *results) marginalMiss() time.Duration { return r.meanMiss() - r.meanHit() }
 
 func meanOf(total int64, n int) time.Duration {
 	if n <= 0 {

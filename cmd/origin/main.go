@@ -90,6 +90,14 @@ func main() {
 		maxSize: config.Int("ORIGIN_MAX_SIZE", 64<<10),
 		alpha:   config.Float("ORIGIN_SIZE_ALPHA", 1.5),
 	}
+	switch {
+	case srv.minSize < 0:
+		obs.Fatal(log, "ORIGIN_MIN_SIZE must not be negative", "value", srv.minSize)
+	case srv.maxSize < srv.minSize:
+		obs.Fatal(log, "ORIGIN_MAX_SIZE must be at least ORIGIN_MIN_SIZE", "min", srv.minSize, "max", srv.maxSize)
+	case !(srv.alpha > 0):
+		obs.Fatal(log, "ORIGIN_SIZE_ALPHA must be positive", "value", srv.alpha)
+	}
 	log.Info("origin configured",
 		"latency", srv.latency.String(), "jitter", srv.jitter.String(),
 		"min_size", srv.minSize, "max_size", srv.maxSize, "alpha", srv.alpha)

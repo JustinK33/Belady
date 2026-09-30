@@ -27,7 +27,10 @@ func TestDeltaRecomputesTheEvictionMeanOverTheWindow(t *testing.T) {
 		EvictNs: 260_000, EvictSample: 100, EvictNsMean: 2600,
 	}
 
-	sd := delta(before, after)
+	sd, err := delta(before, after)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if sd.evictNS != 1000 {
 		t.Errorf("evictNS = %d, want 1000: the window mean, not %d lifetime or a difference of means",
 			sd.evictNS, after.GetEvictNsMean())
@@ -47,8 +50,16 @@ func TestDeltaRecomputesTheEvictionMeanOverTheWindow(t *testing.T) {
 	}
 
 	// A window with no evictions divides by zero if the guard is dropped.
-	if got := delta(before, &beladyv1.StatsResponse{EvictNs: 200_000, EvictSample: 40}).evictNS; got != 0 {
-		t.Errorf("evictNS = %d over a window with no victims, want 0", got)
+	if sd, err := delta(before, before); err != nil || sd.evictNS != 0 {
+		t.Errorf("evictNS = %d (err %v) over a window with no victims, want 0", sd.evictNS, err)
+	}
+}
+
+func TestDeltaRejectsACounterReset(t *testing.T) {
+	before := &beladyv1.StatsResponse{Hits: 100, Misses: 50}
+	after := &beladyv1.StatsResponse{Hits: 10, Misses: 60}
+	if sd, err := delta(before, after); err == nil {
+		t.Fatalf("a restarted node's counters were differenced: %+v", sd)
 	}
 }
 

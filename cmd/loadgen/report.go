@@ -44,7 +44,7 @@ func report(opts options, res *results, sd serverDelta, d derived, elapsed time.
 
 	fmt.Printf("\nclient latency\n")
 	row("mean", fmt.Sprintf("%s (hit %s, miss %s, marginal %s)",
-		res.mean(), res.meanHit(), res.meanMiss(), res.meanMiss()-res.meanHit()))
+		res.mean(), res.meanHit(), res.meanMiss(), res.marginalMiss()))
 	row("p50", res.quantile(0.50).String())
 	row("p90", res.quantile(0.90).String())
 	row("p99", res.quantile(0.99).String())
@@ -77,12 +77,10 @@ type record struct {
 
 	ObjectHit float64 `json:"object_hit"`
 	ByteHit   float64 `json:"byte_hit"`
-	// ClientHit is the same quantity counted on the other side of the wire: the
-	// fraction of responses the gateway marked as served from cache, rather than the
-	// nodes' own shard counters. The text report cross-checks these two; carrying it
-	// in the JSON is what lets a sweep do the same without re-deriving it from the
-	// hit and miss means. They disagree when routing or stats aggregation is broken,
-	// which is a class of bug that leaves the hit ratio looking entirely plausible.
+	// ClientHit is the same quantity counted on the client side: the fraction of
+	// responses the gateway marked as served from cache, rather than the nodes' own
+	// shard counters. The two disagree when routing or stats aggregation is broken,
+	// which leaves ObjectHit looking plausible, so a sweep can cross-check them.
 	ClientHit float64 `json:"client_hit"`
 
 	BeladyMIN           float64 `json:"belady_min"`
@@ -128,7 +126,7 @@ func reportJSON(opts options, res *results, sd serverDelta, d derived, elapsed t
 		MeanNS:         res.mean().Nanoseconds(),
 		MeanHitNS:      res.meanHit().Nanoseconds(),
 		MeanMissNS:     res.meanMiss().Nanoseconds(),
-		MarginalMissNS: (res.meanMiss() - res.meanHit()).Nanoseconds(),
+		MarginalMissNS: res.marginalMiss().Nanoseconds(),
 		P50NS:          res.quantile(0.50).Nanoseconds(),
 		P99NS:          res.quantile(0.99).Nanoseconds(),
 		P999NS:         res.quantile(0.999).Nanoseconds(),
@@ -139,14 +137,12 @@ func reportJSON(opts options, res *results, sd serverDelta, d derived, elapsed t
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(rec); err != nil {
-		fmt.Fprintf(os.Stderr, "encode report: %v\n", err)
-		os.Exit(1)
+		die(1, "encode report: %v", err)
 	}
 }
 
-// round4 keeps the ratios readable at the resolution they are trustworthy to. Hit
-// ratio repeats to a few basis points run to run, so a fifth decimal place would be
-// noise dressed as precision.
+// round4 rounds a ratio to four decimals. Hit ratio repeats to a few basis points
+// run to run, so a fifth decimal is noise.
 func round4(v float64) float64 { return math.Round(v*1e4) / 1e4 }
 
 func row(label, value string) { fmt.Printf("  %-12s %s\n", label, value) }

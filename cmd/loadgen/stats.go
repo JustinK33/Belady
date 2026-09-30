@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+
 	beladyv1 "github.com/JustinK33/Belady/gen/belady/v1"
 	"github.com/JustinK33/Belady/internal/belady"
 )
@@ -26,27 +28,41 @@ type serverDelta struct {
 	evictNS uint64
 }
 
-func delta(before, after *beladyv1.StatsResponse) serverDelta {
+// delta fails if any counter went backwards, which means a node restarted during
+// the window. Unsigned subtraction would otherwise wrap to a huge count.
+func delta(before, after *beladyv1.StatsResponse) (serverDelta, error) {
+	reset := false
+	sub := func(a, b uint64) uint64 {
+		if a < b {
+			reset = true
+			return 0
+		}
+		return a - b
+	}
 	// Recomputed from the summed pair rather than differenced, because a mean is not
 	// a counter: after-minus-before on evict_ns_mean is meaningless.
 	var evictNS uint64
-	if samples := after.GetEvictSample() - before.GetEvictSample(); samples > 0 {
-		evictNS = (after.GetEvictNs() - before.GetEvictNs()) / samples
+	if samples := sub(after.GetEvictSample(), before.GetEvictSample()); samples > 0 {
+		evictNS = sub(after.GetEvictNs(), before.GetEvictNs()) / samples
 	}
-	return serverDelta{
+	sd := serverDelta{
 		policy:        after.GetPolicy(),
 		modelVersion:  after.GetModelVersion(),
-		hits:          after.GetHits() - before.GetHits(),
-		misses:        after.GetMisses() - before.GetMisses(),
-		hitB:          after.GetHitBytes() - before.GetHitBytes(),
-		missB:         after.GetMissBytes() - before.GetMissBytes(),
-		evictions:     after.GetEvictions() - before.GetEvictions(),
-		rejections:    after.GetRejections() - before.GetRejections(),
+		hits:          sub(after.GetHits(), before.GetHits()),
+		misses:        sub(after.GetMisses(), before.GetMisses()),
+		hitB:          sub(after.GetHitBytes(), before.GetHitBytes()),
+		missB:         sub(after.GetMissBytes(), before.GetMissBytes()),
+		evictions:     sub(after.GetEvictions(), before.GetEvictions()),
+		rejections:    sub(after.GetRejections(), before.GetRejections()),
 		objects:       after.GetObjects(),
 		bytesUsed:     after.GetBytesUsed(),
 		bytesCapacity: after.GetBytesCapacity(),
 		evictNS:       evictNS,
 	}
+	if reset {
+		return serverDelta{}, errors.New("a server counter went backwards during the run, so a cache node restarted and the window cannot be measured")
+	}
+	return sd, nil
 }
 
 // derived is everything computed from a run rather than counted during it. It is
