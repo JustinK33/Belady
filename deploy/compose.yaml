@@ -193,7 +193,7 @@ services:
     networks: [belady]
 
   grafana:
-    image: grafana/grafana:13.2.1@sha256:f772d434e8fab0049deb2b1b30abd43342bcfca1537614aa8d36080232cf4283
+    image: grafana/grafana:13.3.0@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
