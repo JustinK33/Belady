@@ -217,6 +217,7 @@ func main() {
 	replicas := config.Int("RING_REPLICAS", 256)
 	factor := config.Float("RING_LOAD_FACTOR", 1.25)
 	maxInflight := config.Int("MAX_INFLIGHT", 4096)
+	httpTimeout := config.Duration("HTTP_TIMEOUT", 5*time.Second)
 	switch {
 	case replicas < 1:
 		obs.Fatal(log, "RING_REPLICAS must be at least 1", "value", replicas)
@@ -224,6 +225,9 @@ func main() {
 		obs.Fatal(log, "RING_LOAD_FACTOR must be above 1", "value", factor)
 	case maxInflight < 1:
 		obs.Fatal(log, "MAX_INFLIGHT must be at least 1", "value", maxInflight)
+	case httpTimeout <= 0:
+		// A zero deadline expires every REST request at once, reported as 429.
+		obs.Fatal(log, "HTTP_TIMEOUT must be positive", "value", httpTimeout.String())
 	}
 
 	srv := &server{
@@ -270,7 +274,7 @@ func main() {
 		if httpAddr == "" {
 			return
 		}
-		api := &httpAPI{srv: srv, token: []byte(token), timeout: config.Duration("HTTP_TIMEOUT", 5*time.Second), log: log}
+		api := &httpAPI{srv: srv, token: []byte(token), timeout: httpTimeout, log: log}
 		if httpErr = serveHTTP(ctx, httpAddr, api); httpErr != nil {
 			log.Error("http api failed", "err", httpErr)
 			stop()
